@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -9,6 +11,13 @@ import (
 )
 
 var device string
+var last_line string
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	// fmt.Fprintf(w, "Hi there, I love %s!", r.URL.Path[1:])
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(last_line))
+}
 
 func readSerial(s *serial.Port, output chan<- string) {
 	buf := make([]byte, 256)
@@ -22,7 +31,6 @@ func readSerial(s *serial.Port, output chan<- string) {
 
 		message += string(buf[:n])
 		message = strings.Replace(message, "\r", "", -1)
-		// message = strings.Replace(message, "\n", "", -1)
 
 		lines := strings.Split(message, "\n")
 
@@ -38,22 +46,47 @@ func readSerial(s *serial.Port, output chan<- string) {
 }
 
 func main() {
-	log.Println("welcome to loranger application")
+	log.Println("welcome to loranger")
 
-	device = os.Args[1]
-	log.Println("# Starting Serial Listener on", device)
+	if len(os.Args) > 1 {
+		device = os.Args[1]
+	}
 
-	c := &serial.Config{Name: device, Baud: 115200}
-	s, err := serial.OpenPort(c)
+	// create channel
+	serial_input := make(chan string, 100)
+
+	files, err := ioutil.ReadDir("/dev")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer s.Close()
 
-	serial_input := make(chan string, 100)
-	go readSerial(s, serial_input)
+	for _, f := range files {
+		device_name := "/dev/" + f.Name()
 
-	for i := range serial_input {
-		log.Println(i)
+		if strings.Contains(device_name, "ttyACM") || strings.Contains(device_name, "tty.usb") {
+			c := &serial.Config{Name: device_name, Baud: 115200}
+			s, err := serial.OpenPort(c)
+			if err != nil {
+				log.Fatal(err)
+				return
+			}
+			defer s.Close()
+
+			log.Println("listening on", device_name)
+
+			// producer feeds lines into channel
+			go readSerial(s, serial_input)
+		}
 	}
+
+	// consumer
+	go func(input chan string) {
+		for line := range input {
+			log.Println(line)
+			last_line = line
+		}
+	}(serial_input)
+
+	http.HandleFunc("/", handler)
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
