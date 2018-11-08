@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -46,7 +47,7 @@ func readSerial(s *serial.Port, output chan<- string) {
 }
 
 func main() {
-	log.Println("welcome to loranger")
+	log.Println("welcome loranger")
 
 	if len(os.Args) > 1 {
 		device = os.Args[1]
@@ -72,7 +73,7 @@ func main() {
 			}
 			defer s.Close()
 
-			log.Println("listening on", device_name)
+			log.Println("reading from", device_name)
 
 			// producer feeds lines into channel
 			go readSerial(s, serial_input)
@@ -88,5 +89,8 @@ func main() {
 	}(serial_input)
 
 	http.HandleFunc("/", handler)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+
+	port := 8080
+	log.Println("server listening on", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
