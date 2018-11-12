@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -12,18 +13,49 @@ import (
 )
 
 var device string
-var last_line string
 
-func handler(w http.ResponseWriter, r *http.Request) {
+// define a Node type
+type Node struct {
+	Address      uint8
+	LastRssi     int
+	BatteryLevel float32
+	TimeStamp    uint64
+	GpsPosition  interface{}
+}
+
+// define our NodeServer
+type NodeServer struct {
+	nodes     map[uint8]Node
+	last_line string
+}
+
+func parseNode(str string) (outNode Node) {
+	var v interface{}
+	if err := json.Unmarshal([]byte(str), &v); err != nil {
+		log.Printf("unable to parse data as json: %s\n", str)
+	} else {
+		log.Println(v)
+	}
+	return outNode
+}
+
+func (b *NodeServer) readData(input chan string) {
+	for line := range input {
+		// log.Println(line)
+		parseNode(line)
+		b.last_line = line
+	}
+}
+
+func (b *NodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// fmt.Fprintf(w, "Hi there, I love %s!", r.URL.Path[1:])
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(last_line))
+	w.Write([]byte(b.last_line))
 }
 
 func readSerial(s *serial.Port, output chan<- string) {
 	buf := make([]byte, 256)
 	var message string
-
 	for {
 		n, err := s.Read(buf)
 		if err != nil {
@@ -35,6 +67,7 @@ func readSerial(s *serial.Port, output chan<- string) {
 
 		lines := strings.Split(message, "\n")
 
+		// at least one complete line
 		if len(lines) > 1 {
 			message = lines[len(lines)-1]
 
@@ -52,6 +85,9 @@ func main() {
 	if len(os.Args) > 1 {
 		device = os.Args[1]
 	}
+
+	// init our NodeServer instance
+	NodeServer := &NodeServer{}
 
 	// create channel
 	serial_input := make(chan string, 100)
@@ -81,16 +117,9 @@ func main() {
 	}
 
 	// consumer
-	go func(input chan string) {
-		for line := range input {
-			log.Println(line)
-			last_line = line
-		}
-	}(serial_input)
-
-	http.HandleFunc("/", handler)
+	go NodeServer.readData(serial_input)
 
 	port := 8080
 	log.Println("server listening on", port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), NodeServer))
 }
