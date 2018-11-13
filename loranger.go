@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/tarm/serial"
 )
@@ -16,50 +17,70 @@ var device string
 
 // define a Node type
 type Node struct {
-	Address      uint8
-	LastRssi     int
-	BatteryLevel float32
-	TimeStamp    uint64
-	GpsPosition  interface{}
+	Address      uint8   `json:"src"`
+	LastRssi     int     `json:"rssi"`
+	Mode         int     `json:"mode"`
+	Temperature  float64 `json:"temp"`
+	BatteryLevel float64 `json:"bat"`
+	TimeStamp    time.Time
+	GpsPosition  interface{} `json:"gps"`
+}
+
+type NodeCommand struct {
+	Address uint8         `json:"dst"`
+	Command string        `json:"cmd"`
+	Params  []interface{} `json:"params"`
 }
 
 // define our NodeServer
 type NodeServer struct {
-	nodes     map[uint8]Node
-	last_line string
+	nodes map[uint8]Node
 }
 
-func parseNode(str string) (outNode Node) {
-	var v interface{}
-	if err := json.Unmarshal([]byte(str), &v); err != nil {
-		log.Printf("unable to parse data as json: %s\n", str)
-	} else {
-		log.Println(v)
-	}
-	return outNode
+// func makeTimestamp() int64 {
+// 	return time.Now().UnixNano() / int64(time.Millisecond)
+// }
+
+// parse something like this: {"src":1,"dst":0,"rssi":-25,"state":{"mode":0,"bat":1}}
+func parseNode(input []byte) (err error, outNode Node) {
+	// var json_root interface{}
+	err = json.Unmarshal(input, &outNode)
+	outNode.TimeStamp = time.Now()
+	return err, outNode
 }
 
-func (b *NodeServer) readData(input chan string) {
+func NewNodeServer() *NodeServer {
+	newServer := &NodeServer{}
+	newServer.nodes = make(map[uint8]Node)
+	return newServer
+}
+
+func (b *NodeServer) readData(input chan []byte) {
 	for line := range input {
-		// log.Println(line)
-		parseNode(line)
-		b.last_line = line
+		if err, node := parseNode(line); err != nil {
+			log.Println("could not parse data as json:", string(line))
+		} else {
+			b.nodes[node.Address] = node
+			out_json, _ := json.Marshal(b.nodes)
+			log.Println(string(out_json))
+		}
 	}
 }
 
 func (b *NodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// fmt.Fprintf(w, "Hi there, I love %s!", r.URL.Path[1:])
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(b.last_line))
+	w.Write([]byte(fmt.Sprint(b.nodes)))
 }
 
-func readSerial(s *serial.Port, output chan<- string) {
+func readSerial(s *serial.Port, output chan<- []byte) {
 	buf := make([]byte, 256)
 	var message string
 	for {
 		n, err := s.Read(buf)
 		if err != nil {
 			log.Fatal(err)
+			continue
 		}
 
 		message += string(buf[:n])
@@ -72,8 +93,7 @@ func readSerial(s *serial.Port, output chan<- string) {
 			message = lines[len(lines)-1]
 
 			for _, l := range lines[:len(lines)-1] {
-				// log.Print(fmt.Sprintf("%d: %s", i, l))
-				output <- l
+				output <- []byte(l)
 			}
 		}
 	}
@@ -87,10 +107,10 @@ func main() {
 	}
 
 	// init our NodeServer instance
-	NodeServer := &NodeServer{}
+	node_server := NewNodeServer()
 
 	// create channel
-	serial_input := make(chan string, 100)
+	serial_input := make(chan []byte, 100)
 
 	files, err := ioutil.ReadDir("/dev")
 	if err != nil {
@@ -117,9 +137,9 @@ func main() {
 	}
 
 	// consumer
-	go NodeServer.readData(serial_input)
+	go node_server.readData(serial_input)
 
 	port := 8080
 	log.Println("server listening on", port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), NodeServer))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), node_server))
 }
