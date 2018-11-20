@@ -74,8 +74,17 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			// entire history vs. last state
 			if strings.Contains(r.URL.Path, "/log") {
-				//TODO: manage time granularity here
-				enc.Encode(nodeHistory)
+				//TODO: manage time-range and -granularity here
+				timeRange := time.Minute * 10
+
+				var firstIndex int
+				for i, logItem := range nodeHistory {
+					firstIndex = i
+					if time.Now().Sub(logItem.TimeStamp) < timeRange {
+						break
+					}
+				}
+				enc.Encode(nodeHistory[firstIndex:])
 			} else {
 				enc.Encode(nodeHistory[len(nodeHistory)-1])
 			}
