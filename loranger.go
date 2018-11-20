@@ -23,7 +23,7 @@ var serialDevices []*serial.Port
 var serialInput, serialOutput chan []byte
 
 // nodes
-var nodes map[int]Node
+var nodes map[int][]Node
 
 // Node structures information of a remote device
 type Node struct {
@@ -50,7 +50,7 @@ func readData(input chan []byte) {
 			log.Println("could not parse data as json:", string(line))
 		} else {
 			node.TimeStamp = time.Now()
-			nodes[node.Address] = node
+			nodes[node.Address] = append(nodes[node.Address], node)
 		}
 	}
 }
@@ -69,25 +69,29 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	if ok {
 		k, _ := strconv.Atoi(nodeID)
-		log.Println("nodeID: ", k)
-		node, ok := nodes[k]
+		nodeHistory, ok := nodes[k]
 
 		if ok {
-			enc.Encode(node)
+			// entire history vs. last state
+			if strings.Contains(r.URL.Path, "/log") {
+				//TODO: manage time granularity here
+				enc.Encode(nodeHistory)
+			} else {
+				enc.Encode(nodeHistory[len(nodeHistory)-1])
+			}
 		}
 	} else {
 		// no nodeId provided, reply with a sorted list of all nodes
-		// To store the keys in slice in sorted order
-		var keys []int
+		var nodeKeys []int
 
 		for k := range nodes {
-			keys = append(keys, k)
+			nodeKeys = append(nodeKeys, k)
 		}
-		sort.Ints(keys)
+		sort.Ints(nodeKeys)
 		nodeList := make([]Node, len(nodes))
 
-		for i, k := range keys {
-			nodeList[i] = nodes[k]
+		for i, k := range nodeKeys {
+			nodeList[i] = nodes[k][len(nodes[k])-1]
 		}
 		enc.Encode(nodeList)
 	}
@@ -150,11 +154,7 @@ func main() {
 	if len(os.Args) > 1 {
 		device = os.Args[1]
 	}
-
-	// init our NodeServer instance
-	// nodeServer := NewNodeServer()
-
-	nodes = make(map[int]Node)
+	nodes = make(map[int][]Node)
 
 	// create channel
 	serialInput = make(chan []byte, 100)
@@ -184,7 +184,6 @@ func main() {
 			go readSerial(s, serialInput)
 		}
 	}
-
 	// consume incoming data
 	go readData(serialInput)
 
@@ -200,10 +199,9 @@ func main() {
 	muxRouter.HandleFunc("/nodes", handleNodes)
 	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand) //.Methods("POST")
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}", handleNodes)
+	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}/log", handleNodes)
 	muxRouter.PathPrefix("/").Handler(fs)
 	http.Handle("/", muxRouter)
-
-	// http.Handle("/", fs)
 
 	port := 8080
 	log.Println("server listening on", port)
