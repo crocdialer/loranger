@@ -16,7 +16,7 @@ import (
 	"github.com/tarm/serial"
 )
 
-var device string
+var serveFilesPath string
 var serialDevices []*serial.Port
 
 // create serial channels
@@ -27,12 +27,12 @@ var nodes map[int][]Node
 
 // Node structures information of a remote device
 type Node struct {
-	Address      int     `json:"address"`
-	LastRssi     int     `json:"rssi"`
-	Mode         int     `json:"mode"`
-	Temperature  float64 `json:"temp"`
-	BatteryLevel float64 `json:"bat"`
-	TimeStamp    time.Time
+	Address      int        `json:"address"`
+	LastRssi     int        `json:"rssi"`
+	Mode         int        `json:"mode"`
+	Temperature  float64    `json:"temp"`
+	BatteryLevel float64    `json:"bat"`
+	TimeStamp    time.Time  `json:"stamp"`
 	GpsPosition  [2]float64 `json:"gps"`
 }
 
@@ -41,6 +41,26 @@ type NodeCommand struct {
 	Address int           `json:"dst"`
 	Command string        `json:"cmd"`
 	Params  []interface{} `json:"params"`
+}
+
+func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
+	durationAccum := granularity
+	lastTimeStamp := nodes[0].TimeStamp
+
+	for _, logItem := range nodes {
+
+		if time.Now().Sub(logItem.TimeStamp) < duration {
+			// accum durations, drop too fine-grained values
+			durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)
+
+			if durationAccum >= granularity {
+				durationAccum = 0
+				outNodes = append(outNodes, logItem)
+			}
+		}
+		lastTimeStamp = logItem.TimeStamp
+	}
+	return outNodes
 }
 
 func readData(input chan []byte) {
@@ -55,16 +75,16 @@ func readData(input chan []byte) {
 	}
 }
 
-// handle node requests:
 // /nodes
 // /nodes/{nodeID:[0-9]+}
+// /nodes/{nodeID:[0-9]+}/log?duration=1h&granularity=10s
 func handleNodes(w http.ResponseWriter, r *http.Request) {
 	log.Printf("request: %s\n", r.URL.Path[1:])
 	w.Header().Set("Content-Type", "application/json")
-
-	vars := mux.Vars(r)
 	enc := json.NewEncoder(w)
 
+	// all nodes or a specific one
+	vars := mux.Vars(r)
 	nodeID, ok := vars["nodeID"]
 
 	if ok {
@@ -73,24 +93,29 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 		if ok {
 			// entire history vs. last state
-			if strings.Contains(r.URL.Path, "/log") {
-				//TODO: manage time-range and -granularity here
-				timeRange := time.Minute * 10
+			if strings.HasSuffix(r.URL.Path, "/log") {
 
-				var firstIndex int
-				for i, logItem := range nodeHistory {
-					firstIndex = i
-					if time.Now().Sub(logItem.TimeStamp) < timeRange {
-						break
-					}
+				//manage time-range and -granularity here
+				// Parses the request body
+				r.ParseForm()
+				duration, err := time.ParseDuration(r.Form.Get("duration"))
+				if err != nil {
+					duration = time.Hour
 				}
-				enc.Encode(nodeHistory[firstIndex:])
+				granularity, err := time.ParseDuration(r.Form.Get("granularity"))
+				if err != nil {
+					granularity = time.Minute
+				}
+				log.Println("log of last:", duration, "granularity:", granularity)
+
+				nodeOutLog := filterNodes(nodeHistory, duration, granularity)
+				enc.Encode(nodeOutLog)
 			} else {
 				enc.Encode(nodeHistory[len(nodeHistory)-1])
 			}
 		}
 	} else {
-		// no nodeId provided, reply with a sorted list of all nodes
+		// no nodeId provided, reply with a sorted list of all nodes' last state
 		var nodeKeys []int
 
 		for k := range nodes {
@@ -152,7 +177,7 @@ func writeData(input chan []byte) {
 	for bytes := range input {
 		for _, s := range serialDevices {
 			s.Write(bytes)
-			s.Flush()
+			// s.Flush()
 		}
 	}
 }
@@ -161,7 +186,9 @@ func main() {
 	log.Println("welcome loranger")
 
 	if len(os.Args) > 1 {
-		device = os.Args[1]
+		serveFilesPath = os.Args[1]
+	} else {
+		serveFilesPath = "static/"
 	}
 	nodes = make(map[int][]Node)
 
@@ -200,7 +227,7 @@ func main() {
 	go writeData(serialOutput)
 
 	// serve static files
-	fs := http.FileServer(http.Dir("static/"))
+	fs := http.FileServer(http.Dir(serveFilesPath))
 
 	muxRouter := mux.NewRouter()
 
@@ -213,6 +240,6 @@ func main() {
 	http.Handle("/", muxRouter)
 
 	port := 8080
-	log.Println("server listening on", port)
+	log.Println("server listening on port", port, " -- serving files from", serveFilesPath)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
