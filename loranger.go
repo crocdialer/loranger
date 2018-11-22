@@ -28,10 +28,12 @@ var nodes map[int][]Node
 // Node structures information of a remote device
 type Node struct {
 	Address      int        `json:"address"`
+	ID           string     `json:"id"`
 	LastRssi     int        `json:"rssi"`
 	Mode         int        `json:"mode"`
 	Temperature  float64    `json:"temp"`
 	BatteryLevel float64    `json:"bat"`
+	Active       bool       `json:"active"`
 	TimeStamp    time.Time  `json:"stamp"`
 	GpsPosition  [2]float64 `json:"gps"`
 }
@@ -71,6 +73,7 @@ func readData(input chan []byte) {
 		} else {
 			node.TimeStamp = time.Now()
 			nodes[node.Address] = append(nodes[node.Address], node)
+			// log.Println(node)
 		}
 	}
 }
@@ -79,7 +82,11 @@ func readData(input chan []byte) {
 // /nodes/{nodeID:[0-9]+}
 // /nodes/{nodeID:[0-9]+}/log?duration=1h&granularity=10s
 func handleNodes(w http.ResponseWriter, r *http.Request) {
-	log.Printf("request: %s\n", r.URL.Path[1:])
+	// log.Printf("request: %s\n", r.URL.Path[1:])
+
+	// TODO: testing only
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 
@@ -126,6 +133,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 		for i, k := range nodeKeys {
 			nodeList[i] = nodes[k][len(nodes[k])-1]
+			nodeList[i].Active = time.Now().Sub(nodeList[i].TimeStamp) < time.Second*10
 		}
 		enc.Encode(nodeList)
 	}
@@ -133,17 +141,51 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 // POST
 func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
-	// TODO: construct NodeCommand from POST-json
-	recCmd := &NodeCommand{1, "record", []interface{}{10}}
-	jsonStr, err := json.Marshal(recCmd)
 
+	// TODO: testing only
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	w.Header().Set("Content-Type", "application/json")
+	// enc := json.NewEncoder(w)
+
+	// construct NodeCommand from GET/POST data
+	r.ParseForm()
+	nodeAction := r.Form.Get("action")
+	if len(nodeAction) == 0 {
+		return
+	}
+	address, err := strconv.Atoi(r.Form.Get("address"))
 	if err != nil {
-		log.Println("could not marshal NodeCommand:", recCmd)
-	} else {
-		// send record command
-		log.Println("sending command:", string(jsonStr))
-		jsonStr = append(jsonStr, '\n')
-		serialOutput <- jsonStr
+		return
+	}
+	paramValue, err := strconv.Atoi(r.Form.Get("value"))
+	if err != nil {
+		paramValue = 1
+	}
+	var nodeCommand *NodeCommand
+
+	switch nodeAction {
+	case "record":
+		duration, err := time.ParseDuration(r.Form.Get("duration"))
+		if err != nil {
+			duration = time.Hour
+		}
+		nodeCommand = &NodeCommand{address, nodeAction, []interface{}{paramValue, duration.Seconds()}}
+	case "flashlight":
+		nodeCommand = &NodeCommand{address, nodeAction, []interface{}{paramValue}}
+	}
+
+	if nodeCommand != nil {
+		jsonStr, err := json.Marshal(nodeCommand)
+
+		if err != nil {
+			log.Println("could not marshal NodeCommand:", nodeCommand)
+		} else {
+			// send record command
+			log.Println("sending command:", string(jsonStr))
+			jsonStr = append(jsonStr, '\n')
+			serialOutput <- jsonStr
+		}
 	}
 }
 
