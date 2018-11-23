@@ -25,6 +25,12 @@ var serialInput, serialOutput chan []byte
 // nodes
 var nodes map[int][]Node
 
+// next command id
+var nextCommandID int
+
+// pending (sent but unackknowledged commands)
+var pendingNodeCommands map[int]*NodeCommand
+
 // Node structures information of a remote device
 type Node struct {
 	Address      int        `json:"address"`
@@ -40,9 +46,15 @@ type Node struct {
 
 // NodeCommand realizes a simple RPC interface
 type NodeCommand struct {
-	Address int           `json:"dst"`
-	Command string        `json:"cmd"`
-	Params  []interface{} `json:"params"`
+	CommandID int           `json:"cmd_id"`
+	Address   int           `json:"dst"`
+	Command   string        `json:"cmd"`
+	Params    []interface{} `json:"params"`
+}
+
+// NodeCommandACK is used as simple ACK for received commands
+type NodeCommandACK struct {
+	Ok bool `json:"ok"`
 }
 
 func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
@@ -142,40 +154,32 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 // POST
 func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 
-	// TODO: testing only
+	// configure proper CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
-	w.Header().Set("Content-Type", "application/json")
-	// enc := json.NewEncoder(w)
+	// decode json-request
+	nodeCommand := &NodeCommand{}
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(nodeCommand)
 
-	// construct NodeCommand from GET/POST data
-	r.ParseForm()
-	nodeAction := r.Form.Get("action")
-	if len(nodeAction) == 0 {
-		return
-	}
-	address, err := strconv.Atoi(r.Form.Get("address"))
-	if err != nil {
-		return
-	}
-	paramValue, err := strconv.Atoi(r.Form.Get("value"))
-	if err != nil {
-		paramValue = 1
-	}
-	var nodeCommand *NodeCommand
+	// insert CommandID
+	nodeCommand.CommandID = nextCommandID
+	nextCommandID++
 
-	switch nodeAction {
-	case "record":
-		duration, err := time.ParseDuration(r.Form.Get("duration"))
-		if err != nil {
-			duration = time.Hour
-		}
-		nodeCommand = &NodeCommand{address, nodeAction, []interface{}{paramValue, duration.Seconds()}}
-	case "flashlight":
-		nodeCommand = &NodeCommand{address, nodeAction, []interface{}{paramValue}}
-	}
+	// check if the node exists
+	_, hasNode := nodes[nodeCommand.Address]
 
-	if nodeCommand != nil {
+	// encode json ACK and send as response
+	enc := json.NewEncoder(w)
+	ack := NodeCommandACK{hasNode}
+	enc.Encode(ack)
+
+	if hasNode {
+		// keep track of the command
+		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
+
 		jsonStr, err := json.Marshal(nodeCommand)
 
 		if err != nil {
@@ -232,7 +236,10 @@ func main() {
 	} else {
 		serveFilesPath = "static/"
 	}
+
+	// make our global state maps
 	nodes = make(map[int][]Node)
+	pendingNodeCommands = make(map[int]*NodeCommand)
 
 	// create channel
 	serialInput = make(chan []byte, 100)
@@ -275,7 +282,7 @@ func main() {
 
 	// services dealing with lora-nodes
 	muxRouter.HandleFunc("/nodes", handleNodes)
-	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand) //.Methods("POST")
+	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}", handleNodes)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}/log", handleNodes)
 	muxRouter.PathPrefix("/").Handler(fs)
