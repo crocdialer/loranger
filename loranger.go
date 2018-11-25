@@ -26,13 +26,44 @@ var serialInput, serialOutput chan []byte
 var nodes map[int][]Node
 
 // next command id
-var nextCommandID int
+var nextCommandID = 1
 
 // pending (sent but unackknowledged commands)
-var pendingNodeCommands map[int]*NodeCommand
+var pendingNodeCommands map[int][]*NodeCommand
+
+// StructType serves as a enum to distinguish different json encoded structs
+type StructType int
+
+const (
+	// NodeType is used type field by Node structs
+	NodeType StructType = 1
+
+	// NodeCommandType is used type field by NodeCommand structs
+	NodeCommandType StructType = 2
+
+	// NodeCommandACKType is used type field by NodeCommandACK structs
+	NodeCommandACKType StructType = 3
+)
+
+func (structType StructType) String() string {
+	names := [...]string{
+		"Node",
+		"NodeCommand",
+		"NodeCommandACK"}
+	if structType < NodeType || structType > NodeCommandACKType {
+		return "Unknown"
+	}
+	return names[structType-1]
+}
+
+// TypeHelper is a small helper struct used to unmarshal json messages to extract their type
+type TypeHelper struct {
+	Type StructType `json:"type"`
+}
 
 // Node structures information of a remote device
 type Node struct {
+	Type         StructType `json:"type"`
 	Address      int        `json:"address"`
 	ID           string     `json:"id"`
 	LastRssi     int        `json:"rssi"`
@@ -46,6 +77,7 @@ type Node struct {
 
 // NodeCommand realizes a simple RPC interface
 type NodeCommand struct {
+	Type      StructType    `json:"type"`
 	CommandID int           `json:"cmd_id"`
 	Address   int           `json:"dst"`
 	Command   string        `json:"cmd"`
@@ -54,7 +86,9 @@ type NodeCommand struct {
 
 // NodeCommandACK is used as simple ACK for received commands
 type NodeCommandACK struct {
-	Ok bool `json:"ok"`
+	Type      StructType `json:"type"`
+	CommandID int        `json:"cmd_id"`
+	Ok        bool       `json:"ok"`
 }
 
 func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
@@ -79,13 +113,31 @@ func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []
 
 func readData(input chan []byte) {
 	for line := range input {
-		var node Node
-		if err := json.Unmarshal(line, &node); err != nil {
-			log.Println("could not parse data as json:", string(line))
+		// log.Println(string(line))
+
+		var typeHelper TypeHelper
+		if err := json.Unmarshal(line, &typeHelper); err != nil {
+			log.Println("could not extract struct-type from data", string(line))
 		} else {
-			node.TimeStamp = time.Now()
-			nodes[node.Address] = append(nodes[node.Address], node)
-			// log.Println(node)
+			switch typeHelper.Type {
+			case NodeType:
+				var node Node
+				if err := json.Unmarshal(line, &node); err != nil {
+					log.Println("could not parse data as json:", string(line))
+				} else {
+					node.TimeStamp = time.Now()
+					nodes[node.Address] = append(nodes[node.Address], node)
+					// log.Println(node)
+				}
+			case NodeCommandACKType:
+				var nodeCommandACK NodeCommandACK
+				if err := json.Unmarshal(line, &nodeCommandACK); err != nil {
+					log.Println("could not parse data as json:", string(line))
+				} else {
+					log.Println("received ACK for command:", nodeCommandACK)
+					delete(pendingNodeCommands, nodeCommandACK.CommandID)
+				}
+			}
 		}
 	}
 }
@@ -164,7 +216,8 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(nodeCommand)
 
-	// insert CommandID
+	// insert struct-type and CommandID
+	nodeCommand.Type = NodeCommandType
 	nodeCommand.CommandID = nextCommandID
 	nextCommandID++
 
@@ -173,24 +226,33 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
-	ack := NodeCommandACK{hasNode}
+	ack := NodeCommandACK{NodeCommandACKType, nodeCommand.CommandID, hasNode}
 	enc.Encode(ack)
 
 	if hasNode {
 		// keep track of the command
-		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
+		pendingNodeCommands[nodeCommand.CommandID] = append(pendingNodeCommands[nodeCommand.CommandID], nodeCommand)
 
 		jsonStr, err := json.Marshal(nodeCommand)
 
 		if err != nil {
 			log.Println("could not marshal NodeCommand:", nodeCommand)
 		} else {
-			// send record command
+			// send command
 			log.Println("sending command:", string(jsonStr))
-			jsonStr = append(jsonStr, '\n')
+			jsonStr = append(jsonStr, []byte("\n\n")...)
 			serialOutput <- jsonStr
 		}
 	}
+}
+
+func handlePendingNodeCommands(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	// encode json ACK and send as response
+	enc := json.NewEncoder(w)
+	enc.Encode(pendingNodeCommands)
 }
 
 func readSerial(s *serial.Port, output chan<- []byte) {
@@ -223,7 +285,7 @@ func writeData(input chan []byte) {
 	for bytes := range input {
 		for _, s := range serialDevices {
 			s.Write(bytes)
-			// s.Flush()
+			s.Flush()
 		}
 	}
 }
@@ -239,7 +301,7 @@ func main() {
 
 	// make our global state maps
 	nodes = make(map[int][]Node)
-	pendingNodeCommands = make(map[int]*NodeCommand)
+	pendingNodeCommands = make(map[int][]*NodeCommand)
 
 	// create channel
 	serialInput = make(chan []byte, 100)
@@ -265,8 +327,14 @@ func main() {
 
 			log.Println("reading from", deviceName)
 
+			// workaround for fishy behaviour: send initial newline char
+			s.Write([]byte("\n"))
+
 			// producer feeds lines into channel
 			go readSerial(s, serialInput)
+
+			// quit after first found serial
+			break
 		}
 	}
 	// consume incoming data
@@ -283,6 +351,7 @@ func main() {
 	// services dealing with lora-nodes
 	muxRouter.HandleFunc("/nodes", handleNodes)
 	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
+	muxRouter.HandleFunc("/nodes/cmd/pending", handlePendingNodeCommands)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}", handleNodes)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}/log", handleNodes)
 	muxRouter.PathPrefix("/").Handler(fs)
