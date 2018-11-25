@@ -29,7 +29,7 @@ var nodes map[int][]Node
 var nextCommandID = 1
 
 // pending (sent but unackknowledged commands)
-var pendingNodeCommands map[int][]*NodeCommand
+var pendingNodeCommands map[int]*NodeCommand
 
 // StructType serves as a enum to distinguish different json encoded structs
 type StructType int
@@ -67,6 +67,7 @@ type Node struct {
 	Address      int        `json:"address"`
 	ID           string     `json:"id"`
 	LastRssi     int        `json:"rssi"`
+	Frequency    float64    `json:"freq"`
 	Mode         int        `json:"mode"`
 	Temperature  float64    `json:"temp"`
 	BatteryLevel float64    `json:"bat"`
@@ -89,6 +90,19 @@ type NodeCommandACK struct {
 	Type      StructType `json:"type"`
 	CommandID int        `json:"cmd_id"`
 	Ok        bool       `json:"ok"`
+}
+
+func (nc *NodeCommand) sendTo(outChannel chan<- []byte) {
+	jsonStr, err := json.Marshal(nc)
+
+	if err != nil {
+		log.Println("could not marshal NodeCommand:", nc)
+	} else {
+		// send command
+		// log.Println("sending command:", string(jsonStr))
+		jsonStr = append(jsonStr, []byte("\n\n")...)
+		outChannel <- jsonStr
+	}
 }
 
 func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
@@ -134,8 +148,13 @@ func readData(input chan []byte) {
 				if err := json.Unmarshal(line, &nodeCommandACK); err != nil {
 					log.Println("could not parse data as json:", string(line))
 				} else {
-					log.Println("received ACK for command:", nodeCommandACK)
-					delete(pendingNodeCommands, nodeCommandACK.CommandID)
+					if nodeCommandACK.Ok {
+						// log.Println("received ACK for command:", nodeCommandACK)
+						delete(pendingNodeCommands, nodeCommandACK.CommandID)
+					} else {
+						log.Println("resending command:", pendingNodeCommands[nodeCommandACK.CommandID])
+						pendingNodeCommands[nodeCommandACK.CommandID].sendTo(serialOutput)
+					}
 				}
 			}
 		}
@@ -148,9 +167,7 @@ func readData(input chan []byte) {
 func handleNodes(w http.ResponseWriter, r *http.Request) {
 	// log.Printf("request: %s\n", r.URL.Path[1:])
 
-	// TODO: testing only
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 
@@ -231,18 +248,8 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 
 	if hasNode {
 		// keep track of the command
-		pendingNodeCommands[nodeCommand.CommandID] = append(pendingNodeCommands[nodeCommand.CommandID], nodeCommand)
-
-		jsonStr, err := json.Marshal(nodeCommand)
-
-		if err != nil {
-			log.Println("could not marshal NodeCommand:", nodeCommand)
-		} else {
-			// send command
-			log.Println("sending command:", string(jsonStr))
-			jsonStr = append(jsonStr, []byte("\n\n")...)
-			serialOutput <- jsonStr
-		}
+		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
+		nodeCommand.sendTo(serialOutput)
 	}
 }
 
@@ -250,9 +257,21 @@ func handlePendingNodeCommands(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	// encode json ACK and send as response
+	var cmdKeys []int
+
+	for k := range pendingNodeCommands {
+		cmdKeys = append(cmdKeys, k)
+	}
+	sort.Ints(cmdKeys)
+	cmdList := make([]*NodeCommand, len(pendingNodeCommands))
+
+	for i, k := range cmdKeys {
+		cmdList[i] = pendingNodeCommands[k]
+	}
+
+	// encode pending commands as json and send as response
 	enc := json.NewEncoder(w)
-	enc.Encode(pendingNodeCommands)
+	enc.Encode(cmdList)
 }
 
 func readSerial(s *serial.Port, output chan<- []byte) {
@@ -301,7 +320,7 @@ func main() {
 
 	// make our global state maps
 	nodes = make(map[int][]Node)
-	pendingNodeCommands = make(map[int][]*NodeCommand)
+	pendingNodeCommands = make(map[int]*NodeCommand)
 
 	// create channel
 	serialInput = make(chan []byte, 100)
