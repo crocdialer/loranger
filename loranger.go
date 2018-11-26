@@ -36,24 +36,25 @@ type StructType int
 
 const (
 	// NodeType is used type field by Node structs
-	NodeType StructType = 1
+	NodeType StructType = 1 << 0
 
 	// NodeCommandType is used type field by NodeCommand structs
-	NodeCommandType StructType = 2
+	NodeCommandType StructType = 1 << 1
 
 	// NodeCommandACKType is used type field by NodeCommandACK structs
-	NodeCommandACKType StructType = 3
+	NodeCommandACKType StructType = 1 << 2
 )
 
 func (structType StructType) String() string {
-	names := [...]string{
-		"Node",
-		"NodeCommand",
-		"NodeCommandACK"}
-	if structType < NodeType || structType > NodeCommandACKType {
-		return "Unknown"
+	names := map[StructType]string{
+		NodeType:           "Node",
+		NodeCommandType:    "NodeCommand",
+		NodeCommandACKType: "NodeCommandACK"}
+	str, ok := names[structType]
+	if ok {
+		return str
 	}
-	return names[structType-1]
+	return "Unknown"
 }
 
 // TypeHelper is a small helper struct used to unmarshal json messages to extract their type
