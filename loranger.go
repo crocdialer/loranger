@@ -37,25 +37,55 @@ var nodeTimeout = time.Second * 10
 // next command id
 var nextCommandID = 1
 
-// pending (sent but unackknowledged commands)
-var pendingNodeCommands map[int]*NodeCommand
+// pending commands (sent but unackknowledged)
+var commands map[int]*NodeCommand
+
+// resend tickers for commands
+var commandTimers map[int]*time.Ticker
 
 var pendingCommandLock = sync.RWMutex{}
 
 // handle for SSE-Server
 var sseServer *sse.Server
 
+// // keepDoingSomething will keep trying to doSomething() until either
+// // we get a result from doSomething() or the timeout expires
+// func keepDoingSomething() (bool, error) {
+// 	timeout := time.After(5 * time.Second)
+// 	tick := time.Tick(500 * time.Millisecond)
+// 	// Keep trying until we're timed out or got a result or got an error
+// 	for {
+// 		select {
+// 		// Got a timeout! fail with a timeout error
+// 		case <-timeout:
+// 			return false, errors.New("timed out")
+// 		// Got a tick, we should check on doSomething()
+// 		case <-tick:
+// 			// ok, err := doSomething()
+// 			// // Error from doSomething(), we should bail
+// 			// if err != nil {
+// 			// 	return false, err
+// 			// 	// doSomething() worked! let's finish up
+// 			// } else if ok {
+// 			// 	return true, nil
+// 			// }
+// 			// doSomething() didn't work yet, but it didn't fail, so let's try again
+// 			// this will exit up to the for loop
+// 		}
+// 	}
+// }
+
 func commandList() []*NodeCommand {
 	var cmdKeys []int
 
-	for k := range pendingNodeCommands {
+	for k := range commands {
 		cmdKeys = append(cmdKeys, k)
 	}
 	sort.Ints(cmdKeys)
-	cmdList := make([]*NodeCommand, len(pendingNodeCommands))
+	cmdList := make([]*NodeCommand, len(commands))
 
 	for i, k := range cmdKeys {
-		cmdList[i] = pendingNodeCommands[k]
+		cmdList[i] = commands[k]
 	}
 	return cmdList
 }
@@ -82,9 +112,7 @@ func readData(input chan []byte) {
 					sseServer.NodeEvent <- &node
 
 					// existing timer?
-					timer, hasTimer := nodeTimers[node.Address]
-
-					if hasTimer {
+					if timer, hasTimer := nodeTimers[node.Address]; hasTimer {
 						timer.Stop()
 					}
 
@@ -107,16 +135,14 @@ func readData(input chan []byte) {
 				} else {
 					if nodeCommandACK.Ok {
 						pendingCommandLock.Lock()
-						// log.Println("received ACK for command:", pendingNodeCommands[nodeCommandACK.CommandID])
-						delete(pendingNodeCommands, nodeCommandACK.CommandID)
+						// log.Println("received ACK for command:", commands[nodeCommandACK.CommandID])
+						if ticker, ok := commandTimers[nodeCommandACK.CommandID]; ok {
+							ticker.Stop()
+						}
+						delete(commandTimers, nodeCommandACK.CommandID)
+						delete(commands, nodeCommandACK.CommandID)
 						pendingCommandLock.Unlock()
-					} else {
-						pendingCommandLock.RLock()
-						log.Println("need to resend command:", pendingNodeCommands[nodeCommandACK.CommandID])
-						pendingNodeCommands[nodeCommandACK.CommandID].SendTo(serialOutput)
-						pendingCommandLock.RUnlock()
 					}
-
 					// emit SSE-event
 					sseServer.NodeCommandEvent <- commandList()
 				}
@@ -213,7 +239,16 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	if hasNode {
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
-		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
+		commands[nodeCommand.CommandID] = nodeCommand
+		t := time.NewTicker(time.Second * 3)
+		commandTimers[nodeCommand.CommandID] = t
+
+		go func() {
+			for range t.C {
+				log.Println("resending:", nodeCommand)
+				nodeCommand.SendTo(serialOutput)
+			}
+		}()
 		pendingCommandLock.Unlock()
 		nodeCommand.SendTo(serialOutput)
 
@@ -222,7 +257,7 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handlePendingNodeCommands(w http.ResponseWriter, r *http.Request) {
+func handlecommands(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
@@ -280,7 +315,8 @@ func main() {
 	// make our global state maps
 	nodes = make(map[int][]Node)
 	nodeTimers = make(map[int]*time.Timer)
-	pendingNodeCommands = make(map[int]*NodeCommand)
+	commands = make(map[int]*NodeCommand)
+	commandTimers = make(map[int]*time.Ticker)
 
 	// create channel
 	serialInput = make(chan []byte, 100)
@@ -335,7 +371,7 @@ func main() {
 	muxRouter.Handle("/events", sseServer)
 	muxRouter.HandleFunc("/nodes", handleNodes)
 	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
-	muxRouter.HandleFunc("/nodes/cmd/pending", handlePendingNodeCommands)
+	muxRouter.HandleFunc("/nodes/cmd/pending", handlecommands)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}", handleNodes)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}/log", handleNodes)
 	muxRouter.PathPrefix("/").Handler(fs)
