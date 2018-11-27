@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/crocdialer/loranger/broker"
 	"github.com/gorilla/mux"
 	"github.com/tarm/serial"
 )
@@ -33,6 +34,9 @@ var nextCommandID = 1
 var pendingNodeCommands map[int]*NodeCommand
 
 var pendingCommandLock = sync.RWMutex{}
+
+// handle for SSE-Broker
+var sseBroker *broker.Broker
 
 // StructType serves as a enum to distinguish different json encoded structs
 type StructType int
@@ -104,8 +108,8 @@ func (nc *NodeCommand) sendTo(outChannel chan<- []byte) {
 	} else {
 		// send command
 		// log.Println("sending command:", string(jsonStr))
-		// jsonStr = append(jsonStr, []byte("\n\n")...)
-		jsonStr = append(jsonStr, '\n')
+		jsonStr = append(jsonStr, []byte("\n\n")...)
+		// jsonStr = append(jsonStr, '\n')
 		outChannel <- jsonStr
 	}
 }
@@ -147,6 +151,7 @@ func readData(input chan []byte) {
 					node.TimeStamp = time.Now()
 					nodes[node.Address] = append(nodes[node.Address], node)
 					// log.Println(node)
+					sseBroker.Notifier <- line
 				}
 			case NodeCommandACKType:
 				var nodeCommandACK NodeCommandACK
@@ -376,9 +381,14 @@ func main() {
 	// serve static files
 	fs := http.FileServer(http.Dir(serveFilesPath))
 
+	// serve eventstream
+	sseBroker = broker.NewServer()
+
+	// create a gorilla mux-router
 	muxRouter := mux.NewRouter()
 
 	// services dealing with lora-nodes
+	muxRouter.Handle("/events", sseBroker)
 	muxRouter.HandleFunc("/nodes", handleNodes)
 	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
 	muxRouter.HandleFunc("/nodes/cmd/pending", handlePendingNodeCommands)
