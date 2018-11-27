@@ -1,18 +1,21 @@
 package broker
 
 import (
+	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
+
+	"github.com/crocdialer/loranger/nodes"
 )
 
 // A Broker holds open client connections,
 // listens for incoming events on its Notifier channel
 // and broadcast event data to all registered connections
 type Broker struct {
+	NodeMsg chan *nodes.Node
 
 	// Events are pushed to this channel by the main events-gathering routine
-	Notifier chan []byte
+	notifier chan []byte
 
 	// New client connections
 	newClients chan chan []byte
@@ -28,7 +31,8 @@ type Broker struct {
 func NewServer() (broker *Broker) {
 	// Instantiate a broker
 	broker = &Broker{
-		Notifier:       make(chan []byte, 1),
+		NodeMsg:        make(chan *nodes.Node),
+		notifier:       make(chan []byte, 1),
 		newClients:     make(chan chan []byte),
 		closingClients: make(chan chan []byte),
 		clients:        make(map[chan []byte]bool),
@@ -41,22 +45,30 @@ func NewServer() (broker *Broker) {
 
 // Listen on different channels and act accordingly
 func (broker *Broker) listen() {
+	// eventID := 0
+
 	for {
 		select {
 		case s := <-broker.newClients:
-			// A new client has connected.
-			// Register their message channel
+			// new client has connected, register their message channel
 			broker.clients[s] = true
-			log.Printf("Client added. %d registered clients", len(broker.clients))
+			// log.Printf("Client added. %d registered clients", len(broker.clients))
 
 		case s := <-broker.closingClients:
-			// A client has dettached and we want to
-			// stop sending them messages.
+			// client has dettached, stop sending them messages.
 			delete(broker.clients, s)
-			log.Printf("Removed client. %d registered clients", len(broker.clients))
+			// log.Printf("Removed client. %d registered clients", len(broker.clients))
 
-		case event := <-broker.Notifier:
-			// log.Println("SSE: new message:", string(event))
+		case node := <-broker.NodeMsg:
+			if jsonNode, err := json.Marshal(node); err == nil {
+				sseBLob := fmt.Sprintf("event: node\ndata: %s\n\n", jsonNode)
+
+				// send out NodeEvent
+				broker.notifier <- []byte(sseBLob)
+			}
+
+		case event := <-broker.notifier:
+
 			// Send event to all connected clients
 			for clientMessageChan := range broker.clients {
 				clientMessageChan <- event
@@ -102,11 +114,7 @@ func (broker *Broker) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// block waiting for messages broadcast on this connection's messageChan
 	for {
-		// Write to the ResponseWriter
-		// Server Sent Events compatible
-		fmt.Fprintf(rw, "data: %s\n\n", <-messageChan)
-
-		// Flush the data immediatly instead of buffering it for later.
+		rw.Write(<-messageChan)
 		flusher.Flush()
 	}
 }

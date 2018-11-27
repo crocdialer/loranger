@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/crocdialer/loranger/broker"
+	. "github.com/crocdialer/loranger/nodes"
 	"github.com/gorilla/mux"
 	"github.com/tarm/serial"
 )
@@ -37,82 +38,6 @@ var pendingCommandLock = sync.RWMutex{}
 
 // handle for SSE-Broker
 var sseBroker *broker.Broker
-
-// StructType serves as a enum to distinguish different json encoded structs
-type StructType int
-
-const (
-	// NodeType is used type field by Node structs
-	NodeType StructType = 1 << 0
-
-	// NodeCommandType is used type field by NodeCommand structs
-	NodeCommandType StructType = 1 << 1
-
-	// NodeCommandACKType is used type field by NodeCommandACK structs
-	NodeCommandACKType StructType = 1 << 2
-)
-
-func (structType StructType) String() string {
-	names := map[StructType]string{
-		NodeType:           "Node",
-		NodeCommandType:    "NodeCommand",
-		NodeCommandACKType: "NodeCommandACK"}
-	str, ok := names[structType]
-	if ok {
-		return str
-	}
-	return "Unknown"
-}
-
-// TypeHelper is a small helper struct used to unmarshal json messages to extract their type
-type TypeHelper struct {
-	Type StructType `json:"type"`
-}
-
-// Node structures information of a remote device
-type Node struct {
-	Type         StructType `json:"type"`
-	Address      int        `json:"address"`
-	ID           string     `json:"id"`
-	LastRssi     int        `json:"rssi"`
-	Frequency    float64    `json:"freq"`
-	Mode         int        `json:"mode"`
-	Temperature  float64    `json:"temp"`
-	BatteryLevel float64    `json:"bat"`
-	Active       bool       `json:"active"`
-	TimeStamp    time.Time  `json:"stamp"`
-	GpsPosition  [2]float64 `json:"gps"`
-}
-
-// NodeCommand realizes a simple RPC interface
-type NodeCommand struct {
-	Type      StructType    `json:"type"`
-	CommandID int           `json:"cmd_id"`
-	Address   int           `json:"dst"`
-	Command   string        `json:"cmd"`
-	Params    []interface{} `json:"params"`
-}
-
-// NodeCommandACK is used as simple ACK for received commands
-type NodeCommandACK struct {
-	Type      StructType `json:"type"`
-	CommandID int        `json:"cmd_id"`
-	Ok        bool       `json:"ok"`
-}
-
-func (nc *NodeCommand) sendTo(outChannel chan<- []byte) {
-	jsonStr, err := json.Marshal(nc)
-
-	if err != nil {
-		log.Println("could not marshal NodeCommand:", nc)
-	} else {
-		// send command
-		// log.Println("sending command:", string(jsonStr))
-		jsonStr = append(jsonStr, []byte("\n\n")...)
-		// jsonStr = append(jsonStr, '\n')
-		outChannel <- jsonStr
-	}
-}
 
 func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
 	durationAccum := granularity
@@ -148,10 +73,12 @@ func readData(input chan []byte) {
 				if err := json.Unmarshal(line, &node); err != nil {
 					log.Println("could not parse data as json:", string(line))
 				} else {
+					node.Active = true
 					node.TimeStamp = time.Now()
 					nodes[node.Address] = append(nodes[node.Address], node)
-					// log.Println(node)
-					sseBroker.Notifier <- line
+
+					// send to SSE-broker
+					sseBroker.NodeMsg <- &node
 				}
 			case NodeCommandACKType:
 				var nodeCommandACK NodeCommandACK
@@ -166,7 +93,7 @@ func readData(input chan []byte) {
 					} else {
 						pendingCommandLock.RLock()
 						log.Println("need to resend command:", pendingNodeCommands[nodeCommandACK.CommandID])
-						pendingNodeCommands[nodeCommandACK.CommandID].sendTo(serialOutput)
+						pendingNodeCommands[nodeCommandACK.CommandID].SendTo(serialOutput)
 						pendingCommandLock.RUnlock()
 					}
 				}
@@ -257,7 +184,7 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
-	ack := NodeCommandACK{NodeCommandACKType, nodeCommand.CommandID, hasNode}
+	ack := NodeCommandACK{Type: NodeCommandACKType, CommandID: nodeCommand.CommandID, Ok: hasNode}
 	enc.Encode(ack)
 
 	if hasNode {
@@ -265,7 +192,7 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 		pendingCommandLock.Lock()
 		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
 		pendingCommandLock.Unlock()
-		nodeCommand.sendTo(serialOutput)
+		nodeCommand.SendTo(serialOutput)
 	}
 }
 
