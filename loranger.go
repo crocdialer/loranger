@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -30,6 +31,8 @@ var nextCommandID = 1
 
 // pending (sent but unackknowledged commands)
 var pendingNodeCommands map[int]*NodeCommand
+
+var pendingCommandLock = sync.RWMutex{}
 
 // StructType serves as a enum to distinguish different json encoded structs
 type StructType int
@@ -101,7 +104,8 @@ func (nc *NodeCommand) sendTo(outChannel chan<- []byte) {
 	} else {
 		// send command
 		// log.Println("sending command:", string(jsonStr))
-		jsonStr = append(jsonStr, []byte("\n\n")...)
+		// jsonStr = append(jsonStr, []byte("\n\n")...)
+		jsonStr = append(jsonStr, '\n')
 		outChannel <- jsonStr
 	}
 }
@@ -150,11 +154,15 @@ func readData(input chan []byte) {
 					log.Println("could not parse data as json:", string(line))
 				} else {
 					if nodeCommandACK.Ok {
-						// log.Println("received ACK for command:", nodeCommandACK)
+						pendingCommandLock.Lock()
+						// log.Println("received ACK for command:", pendingNodeCommands[nodeCommandACK.CommandID])
 						delete(pendingNodeCommands, nodeCommandACK.CommandID)
+						pendingCommandLock.Unlock()
 					} else {
-						log.Println("resending command:", pendingNodeCommands[nodeCommandACK.CommandID])
+						pendingCommandLock.RLock()
+						log.Println("need to resend command:", pendingNodeCommands[nodeCommandACK.CommandID])
 						pendingNodeCommands[nodeCommandACK.CommandID].sendTo(serialOutput)
+						pendingCommandLock.RUnlock()
 					}
 				}
 			}
@@ -248,8 +256,10 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(ack)
 
 	if hasNode {
-		// keep track of the command
+		// lock mutex and keep track of the command
+		pendingCommandLock.Lock()
 		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
+		pendingCommandLock.Unlock()
 		nodeCommand.sendTo(serialOutput)
 	}
 }
