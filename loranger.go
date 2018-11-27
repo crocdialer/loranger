@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/crocdialer/loranger/broker"
 	. "github.com/crocdialer/loranger/nodes"
+	"github.com/crocdialer/loranger/sse"
 	"github.com/gorilla/mux"
 	"github.com/tarm/serial"
 )
@@ -28,6 +28,12 @@ var serialInput, serialOutput chan []byte
 // nodes
 var nodes map[int][]Node
 
+// deadline timers for active Nodes
+var nodeTimers map[int]*time.Timer
+
+// inactivity timeout for Nodes
+var nodeTimeout = time.Second * 10
+
 // next command id
 var nextCommandID = 1
 
@@ -36,27 +42,22 @@ var pendingNodeCommands map[int]*NodeCommand
 
 var pendingCommandLock = sync.RWMutex{}
 
-// handle for SSE-Broker
-var sseBroker *broker.Broker
+// handle for SSE-Server
+var sseServer *sse.Server
 
-func filterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
-	durationAccum := granularity
-	lastTimeStamp := nodes[0].TimeStamp
+func commandList() []*NodeCommand {
+	var cmdKeys []int
 
-	for _, logItem := range nodes {
-
-		if time.Now().Sub(logItem.TimeStamp) < duration {
-			// accum durations, drop too fine-grained values
-			durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)
-
-			if durationAccum >= granularity {
-				durationAccum = 0
-				outNodes = append(outNodes, logItem)
-			}
-		}
-		lastTimeStamp = logItem.TimeStamp
+	for k := range pendingNodeCommands {
+		cmdKeys = append(cmdKeys, k)
 	}
-	return outNodes
+	sort.Ints(cmdKeys)
+	cmdList := make([]*NodeCommand, len(pendingNodeCommands))
+
+	for i, k := range cmdKeys {
+		cmdList[i] = pendingNodeCommands[k]
+	}
+	return cmdList
 }
 
 func readData(input chan []byte) {
@@ -77,8 +78,27 @@ func readData(input chan []byte) {
 					node.TimeStamp = time.Now()
 					nodes[node.Address] = append(nodes[node.Address], node)
 
-					// send to SSE-broker
-					sseBroker.NodeMsg <- &node
+					// emit SSE-event
+					sseServer.NodeEvent <- &node
+
+					// existing timer?
+					timer, hasTimer := nodeTimers[node.Address]
+
+					if hasTimer {
+						timer.Stop()
+					}
+
+					// create deadline Timer for inactivity status
+					nodeTimers[node.Address] = time.AfterFunc(nodeTimeout, func() {
+
+						// copy last state and set inactive
+						newState := nodes[node.Address][len(nodes[node.Address])-1]
+						newState.Active = false
+						nodes[node.Address] = append(nodes[node.Address], newState)
+
+						// emit SSE-event
+						sseServer.NodeEvent <- &newState
+					})
 				}
 			case NodeCommandACKType:
 				var nodeCommandACK NodeCommandACK
@@ -96,6 +116,9 @@ func readData(input chan []byte) {
 						pendingNodeCommands[nodeCommandACK.CommandID].SendTo(serialOutput)
 						pendingCommandLock.RUnlock()
 					}
+
+					// emit SSE-event
+					sseServer.NodeCommandEvent <- commandList()
 				}
 			}
 		}
@@ -137,7 +160,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Println("log of last:", duration, "granularity:", granularity)
 
-				nodeOutLog := filterNodes(nodeHistory, duration, granularity)
+				nodeOutLog := FilterNodes(nodeHistory, duration, granularity)
 				enc.Encode(nodeOutLog)
 			} else {
 				enc.Encode(nodeHistory[len(nodeHistory)-1])
@@ -193,6 +216,9 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 		pendingNodeCommands[nodeCommand.CommandID] = nodeCommand
 		pendingCommandLock.Unlock()
 		nodeCommand.SendTo(serialOutput)
+
+		// emit SSE-event
+		sseServer.NodeCommandEvent <- commandList()
 	}
 }
 
@@ -200,17 +226,7 @@ func handlePendingNodeCommands(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	var cmdKeys []int
-
-	for k := range pendingNodeCommands {
-		cmdKeys = append(cmdKeys, k)
-	}
-	sort.Ints(cmdKeys)
-	cmdList := make([]*NodeCommand, len(pendingNodeCommands))
-
-	for i, k := range cmdKeys {
-		cmdList[i] = pendingNodeCommands[k]
-	}
+	cmdList := commandList()
 
 	// encode pending commands as json and send as response
 	enc := json.NewEncoder(w)
@@ -263,6 +279,7 @@ func main() {
 
 	// make our global state maps
 	nodes = make(map[int][]Node)
+	nodeTimers = make(map[int]*time.Timer)
 	pendingNodeCommands = make(map[int]*NodeCommand)
 
 	// create channel
@@ -309,13 +326,13 @@ func main() {
 	fs := http.FileServer(http.Dir(serveFilesPath))
 
 	// serve eventstream
-	sseBroker = broker.NewServer()
+	sseServer = sse.NewServer()
 
 	// create a gorilla mux-router
 	muxRouter := mux.NewRouter()
 
 	// services dealing with lora-nodes
-	muxRouter.Handle("/events", sseBroker)
+	muxRouter.Handle("/events", sseServer)
 	muxRouter.HandleFunc("/nodes", handleNodes)
 	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
 	muxRouter.HandleFunc("/nodes/cmd/pending", handlePendingNodeCommands)

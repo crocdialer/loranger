@@ -10,13 +10,13 @@ import (
 type StructType int
 
 const (
-	// NodeType is used type field by Node structs
+	// NodeType is used as type field by Node structs
 	NodeType StructType = 1 << 0
 
-	// NodeCommandType is used type field by NodeCommand structs
+	// NodeCommandType is used as type field by NodeCommand structs
 	NodeCommandType StructType = 1 << 1
 
-	// NodeCommandACKType is used type field by NodeCommandACK structs
+	// NodeCommandACKType is used as type field by NodeCommandACK structs
 	NodeCommandACKType StructType = 1 << 2
 )
 
@@ -81,4 +81,25 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 		// jsonStr = append(jsonStr, '\n')
 		outChannel <- jsonStr
 	}
+}
+
+// FilterNodes filters a slice of Nodes according to the provided duration and granularity
+func FilterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
+	durationAccum := granularity
+	lastTimeStamp := nodes[0].TimeStamp
+
+	for _, logItem := range nodes {
+
+		if time.Now().Sub(logItem.TimeStamp) < duration {
+			// accum durations, drop too fine-grained values
+			durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)
+
+			if durationAccum >= granularity {
+				durationAccum = 0
+				outNodes = append(outNodes, logItem)
+			}
+		}
+		lastTimeStamp = logItem.TimeStamp
+	}
+	return outNodes
 }
