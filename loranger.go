@@ -19,7 +19,8 @@ import (
 	"github.com/tarm/serial"
 )
 
-var serveFilesPath string
+var port = 8080
+var serveFilesPath = "./public"
 var serialDevices []*serial.Port
 
 // create serial channels
@@ -299,10 +300,16 @@ func writeData(input chan []byte) {
 func main() {
 	log.Println("welcome loranger")
 
+	// get serve path
 	if len(os.Args) > 1 {
 		serveFilesPath = os.Args[1]
-	} else {
-		serveFilesPath = "static/"
+	}
+
+	// get server port
+	if len(os.Args) > 2 {
+		if p, err := strconv.Atoi(os.Args[2]); err == nil {
+			port = p
+		}
 	}
 
 	// make our global state maps
@@ -371,7 +378,6 @@ func main() {
 	muxRouter.PathPrefix("/").Handler(fs)
 	http.Handle("/", muxRouter)
 
-	port := 8080
 	log.Println("server listening on port", port, " -- serving files from", serveFilesPath)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
