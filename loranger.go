@@ -19,6 +19,28 @@ import (
 	"github.com/tarm/serial"
 )
 
+//CommandBundle groups assets for pending commands
+type CommandBundle struct {
+	Command        *NodeCommand
+	Ticker         *time.Ticker
+	NumRetransmits int
+}
+
+// NewCommandBundle creates a new instance and set up a periodic retransmit
+func NewCommandBundle(command *NodeCommand, retransmit time.Duration) (bundle *CommandBundle) {
+	bundle = &CommandBundle{Command: command, Ticker: time.NewTicker(retransmit)}
+	go bundle.transmit()
+	return bundle
+}
+
+func (cmd *CommandBundle) transmit() {
+	for range cmd.Ticker.C {
+		cmd.NumRetransmits++
+		log.Println("resending:", cmd.Command)
+		cmd.Command.SendTo(serialOutput)
+	}
+}
+
 var serveFilesPath string
 var serialDevices []*serial.Port
 
@@ -38,10 +60,12 @@ var nodeTimeout = time.Second * 10
 var nextCommandID = 1
 
 // pending commands (sent but unackknowledged)
-var commands map[int]*NodeCommand
+var commands map[int]*CommandBundle
+
+// var commands map[int]*NodeCommand
 
 // resend tickers for commands
-var commandTimers map[int]*time.Ticker
+// var commandTimers map[int]*time.Ticker
 
 var pendingCommandLock = sync.RWMutex{}
 
@@ -58,7 +82,7 @@ func commandList() []*NodeCommand {
 	cmdList := make([]*NodeCommand, len(commands))
 
 	for i, k := range cmdKeys {
-		cmdList[i] = commands[k]
+		cmdList[i] = commands[k].Command
 	}
 	return cmdList
 }
@@ -109,10 +133,9 @@ func readData(input chan []byte) {
 					if nodeCommandACK.Ok {
 						pendingCommandLock.Lock()
 						// log.Println("received ACK for command:", commands[nodeCommandACK.CommandID])
-						if ticker, ok := commandTimers[nodeCommandACK.CommandID]; ok {
-							ticker.Stop()
+						if cmd, ok := commands[nodeCommandACK.CommandID]; ok {
+							cmd.Ticker.Stop()
 						}
-						delete(commandTimers, nodeCommandACK.CommandID)
 						delete(commands, nodeCommandACK.CommandID)
 						pendingCommandLock.Unlock()
 					}
@@ -177,7 +200,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 		for i, k := range nodeKeys {
 			nodeList[i] = nodes[k][len(nodes[k])-1]
-			nodeList[i].Active = time.Now().Sub(nodeList[i].TimeStamp) < time.Second*10
+			// nodeList[i].Active = time.Now().Sub(nodeList[i].TimeStamp) < time.Second*10
 		}
 		enc.Encode(nodeList)
 	}
@@ -212,16 +235,8 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	if hasNode {
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
-		commands[nodeCommand.CommandID] = nodeCommand
-		t := time.NewTicker(time.Second * 3)
-		commandTimers[nodeCommand.CommandID] = t
+		commands[nodeCommand.CommandID] = NewCommandBundle(nodeCommand, time.Second*3)
 
-		go func() {
-			for range t.C {
-				log.Println("resending:", nodeCommand)
-				nodeCommand.SendTo(serialOutput)
-			}
-		}()
 		pendingCommandLock.Unlock()
 		nodeCommand.SendTo(serialOutput)
 
@@ -288,12 +303,11 @@ func main() {
 	// make our global state maps
 	nodes = make(map[int][]Node)
 	nodeTimers = make(map[int]*time.Timer)
-	commands = make(map[int]*NodeCommand)
-	commandTimers = make(map[int]*time.Ticker)
+	commands = make(map[int]*CommandBundle)
 
 	// create channel
-	serialInput = make(chan []byte, 100)
-	serialOutput = make(chan []byte, 100)
+	serialInput = make(chan []byte)
+	serialOutput = make(chan []byte)
 
 	files, err := ioutil.ReadDir("/dev")
 	if err != nil {
