@@ -14,7 +14,7 @@ import (
 type Server struct {
 	NodeEvent chan *nodes.Node
 
-	NodeCommandEvent chan []*nodes.NodeCommand
+	NodeCommandEvent chan []*nodes.CommandTransfer
 
 	// Events are pushed to this channel by the main events-gathering routine
 	notifier chan []byte
@@ -34,7 +34,7 @@ func NewServer() (server *Server) {
 	// Instantiate a server
 	server = &Server{
 		NodeEvent:        make(chan *nodes.Node),
-		NodeCommandEvent: make(chan []*nodes.NodeCommand),
+		NodeCommandEvent: make(chan []*nodes.CommandTransfer),
 		notifier:         make(chan []byte, 1),
 		newClients:       make(chan chan []byte),
 		closingClients:   make(chan chan []byte),

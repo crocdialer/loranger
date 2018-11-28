@@ -40,25 +40,31 @@ var nextCommandID = 1
 // pending commands (sent but unackknowledged)
 var commands map[int]*nodes.CommandTransfer
 
+// keep track of issued commands
+var commandLog []nodes.CommandLogItem
+
 // retransmit timeout for commands
-var commandTimeout = time.Millisecond * 1800
+var commandTimeout = time.Millisecond * 1900
+
+// maximum number of command (re-)transmits
+var commandMaxNumTransmit = 10
 
 var pendingCommandLock = sync.RWMutex{}
 
 // handle for SSE-Server
 var sseServer *sse.Server
 
-func commandList() []*nodes.NodeCommand {
+func commandList() []*nodes.CommandTransfer {
 	var cmdKeys []int
 
 	for k := range commands {
 		cmdKeys = append(cmdKeys, k)
 	}
 	sort.Ints(cmdKeys)
-	cmdList := make([]*nodes.NodeCommand, len(commands))
+	cmdList := make([]*nodes.CommandTransfer, len(commands))
 
 	for i, k := range cmdKeys {
-		cmdList[i] = commands[k].Command
+		cmdList[i] = commands[k]
 	}
 	return cmdList
 }
@@ -111,6 +117,8 @@ func readData(input chan []byte) {
 						// log.Println("received ACK for command:", commands[nodeCommandACK.CommandID])
 						if cmd, ok := commands[nodeCommandACK.CommandID]; ok {
 							cmd.Ticker.Stop()
+							commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
+								Attempts: len(cmd.Stamps), Stamp: time.Now()})
 						}
 						delete(commands, nodeCommandACK.CommandID)
 						pendingCommandLock.Unlock()
@@ -176,7 +184,6 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 		for i, k := range nodeKeys {
 			nodeList[i] = nodeMap[k][len(nodeMap[k])-1]
-			// nodeList[i].Active = time.Now().Sub(nodeList[i].TimeStamp) < time.Second*10
 		}
 		enc.Encode(nodeList)
 	}
@@ -209,25 +216,51 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(ack)
 
 	if hasNode {
+		commandTransfer := nodes.NewCommandTransfer(nodeCommand, serialOutput, commandTimeout)
+
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
-		commands[nodeCommand.CommandID] = nodes.NewCommandTransfer(nodeCommand, serialOutput, commandTimeout)
+		commands[nodeCommand.CommandID] = commandTransfer
 		pendingCommandLock.Unlock()
 
-		// emit SSE-event
-		sseServer.NodeCommandEvent <- commandList()
+		// emit SSE-events for changes, monitor number of retransmits
+		go func() {
+			for numTransmits := range commandTransfer.C {
+				if numTransmits > commandMaxNumTransmit {
+					log.Println("node unreachable:", commandTransfer)
+
+					cmdID := commandTransfer.Command.CommandID
+					pendingCommandLock.Lock()
+					if cmd, ok := commands[cmdID]; ok {
+						cmd.Ticker.Stop()
+						commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
+							Attempts: 0, Stamp: time.Now()})
+					}
+					delete(commands, cmdID)
+					pendingCommandLock.Unlock()
+				}
+				sseServer.NodeCommandEvent <- commandList()
+			}
+		}()
 	}
 }
 
-func handlecommands(w http.ResponseWriter, r *http.Request) {
+func handlePendingCommands(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	cmdList := commandList()
+	// encode pending commands as json and send as response
+	enc := json.NewEncoder(w)
+	enc.Encode(commandList())
+}
+
+func handleCommandLog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	// encode pending commands as json and send as response
 	enc := json.NewEncoder(w)
-	enc.Encode(cmdList)
+	enc.Encode(commandLog)
 }
 
 func readSerial(s *serial.Port, output chan<- []byte) {
@@ -276,6 +309,7 @@ func main() {
 	nodeMap = make(map[int][]nodes.Node)
 	nodeTimers = make(map[int]*time.Timer)
 	commands = make(map[int]*nodes.CommandTransfer)
+	commandLog = []nodes.CommandLogItem{}
 
 	// create serial IO-channels
 	serialInput = make(chan []byte)
@@ -330,7 +364,8 @@ func main() {
 	muxRouter.Handle("/events", sseServer)
 	muxRouter.HandleFunc("/nodes", handleNodes)
 	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
-	muxRouter.HandleFunc("/nodes/cmd/pending", handlecommands)
+	muxRouter.HandleFunc("/nodes/cmd/pending", handlePendingCommands)
+	muxRouter.HandleFunc("/nodes/cmd/log", handleCommandLog)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}", handleNodes)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}/log", handleNodes)
 	muxRouter.PathPrefix("/").Handler(fs)
