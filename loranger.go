@@ -13,33 +13,11 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/crocdialer/loranger/nodes"
+	"github.com/crocdialer/loranger/nodes"
 	"github.com/crocdialer/loranger/sse"
 	"github.com/gorilla/mux"
 	"github.com/tarm/serial"
 )
-
-//CommandBundle groups assets for pending commands
-type CommandBundle struct {
-	Command        *NodeCommand
-	Ticker         *time.Ticker
-	NumRetransmits int
-}
-
-// NewCommandBundle creates a new instance and set up a periodic retransmit
-func NewCommandBundle(command *NodeCommand, retransmit time.Duration) (bundle *CommandBundle) {
-	bundle = &CommandBundle{Command: command, Ticker: time.NewTicker(retransmit)}
-	go bundle.transmit()
-	return bundle
-}
-
-func (cmd *CommandBundle) transmit() {
-	for range cmd.Ticker.C {
-		cmd.NumRetransmits++
-		log.Println("resending:", cmd.Command)
-		cmd.Command.SendTo(serialOutput)
-	}
-}
 
 var serveFilesPath string
 var serialDevices []*serial.Port
@@ -48,7 +26,7 @@ var serialDevices []*serial.Port
 var serialInput, serialOutput chan []byte
 
 // nodes
-var nodes map[int][]Node
+var nodeMap map[int][]nodes.Node
 
 // deadline timers for active Nodes
 var nodeTimers map[int]*time.Timer
@@ -60,26 +38,24 @@ var nodeTimeout = time.Second * 10
 var nextCommandID = 1
 
 // pending commands (sent but unackknowledged)
-var commands map[int]*CommandBundle
+var commands map[int]*nodes.CommandTransfer
 
-// var commands map[int]*NodeCommand
-
-// resend tickers for commands
-// var commandTimers map[int]*time.Ticker
+// retransmit timeout for commands
+var commandTimeout = time.Millisecond * 1800
 
 var pendingCommandLock = sync.RWMutex{}
 
 // handle for SSE-Server
 var sseServer *sse.Server
 
-func commandList() []*NodeCommand {
+func commandList() []*nodes.NodeCommand {
 	var cmdKeys []int
 
 	for k := range commands {
 		cmdKeys = append(cmdKeys, k)
 	}
 	sort.Ints(cmdKeys)
-	cmdList := make([]*NodeCommand, len(commands))
+	cmdList := make([]*nodes.NodeCommand, len(commands))
 
 	for i, k := range cmdKeys {
 		cmdList[i] = commands[k].Command
@@ -91,19 +67,19 @@ func readData(input chan []byte) {
 	for line := range input {
 		// log.Println(string(line))
 
-		var typeHelper TypeHelper
+		var typeHelper nodes.TypeHelper
 		if err := json.Unmarshal(line, &typeHelper); err != nil {
 			log.Println("could not extract struct-type from data", string(line))
 		} else {
 			switch typeHelper.Type {
-			case NodeType:
-				var node Node
+			case nodes.NodeType:
+				var node nodes.Node
 				if err := json.Unmarshal(line, &node); err != nil {
 					log.Println("could not parse data as json:", string(line))
 				} else {
 					node.Active = true
 					node.TimeStamp = time.Now()
-					nodes[node.Address] = append(nodes[node.Address], node)
+					nodeMap[node.Address] = append(nodeMap[node.Address], node)
 
 					// emit SSE-event
 					sseServer.NodeEvent <- &node
@@ -117,16 +93,16 @@ func readData(input chan []byte) {
 					nodeTimers[node.Address] = time.AfterFunc(nodeTimeout, func() {
 
 						// copy last state and set inactive
-						newState := nodes[node.Address][len(nodes[node.Address])-1]
+						newState := nodeMap[node.Address][len(nodeMap[node.Address])-1]
 						newState.Active = false
-						nodes[node.Address] = append(nodes[node.Address], newState)
+						nodeMap[node.Address] = append(nodeMap[node.Address], newState)
 
 						// emit SSE-event
 						sseServer.NodeEvent <- &newState
 					})
 				}
-			case NodeCommandACKType:
-				var nodeCommandACK NodeCommandACK
+			case nodes.NodeCommandACKType:
+				var nodeCommandACK nodes.NodeCommandACK
 				if err := json.Unmarshal(line, &nodeCommandACK); err != nil {
 					log.Println("could not parse data as json:", string(line))
 				} else {
@@ -163,7 +139,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	if ok {
 		k, _ := strconv.Atoi(nodeID)
-		nodeHistory, ok := nodes[k]
+		nodeHistory, ok := nodeMap[k]
 
 		if ok {
 			// entire history vs. last state
@@ -182,7 +158,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Println("log of last:", duration, "granularity:", granularity)
 
-				nodeOutLog := FilterNodes(nodeHistory, duration, granularity)
+				nodeOutLog := nodes.FilterNodes(nodeHistory, duration, granularity)
 				enc.Encode(nodeOutLog)
 			} else {
 				enc.Encode(nodeHistory[len(nodeHistory)-1])
@@ -192,14 +168,14 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 		// no nodeId provided, reply with a sorted list of all nodes' last state
 		var nodeKeys []int
 
-		for k := range nodes {
+		for k := range nodeMap {
 			nodeKeys = append(nodeKeys, k)
 		}
 		sort.Ints(nodeKeys)
-		nodeList := make([]Node, len(nodes))
+		nodeList := make([]nodes.Node, len(nodeMap))
 
 		for i, k := range nodeKeys {
-			nodeList[i] = nodes[k][len(nodes[k])-1]
+			nodeList[i] = nodeMap[k][len(nodeMap[k])-1]
 			// nodeList[i].Active = time.Now().Sub(nodeList[i].TimeStamp) < time.Second*10
 		}
 		enc.Encode(nodeList)
@@ -215,30 +191,28 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 	// decode json-request
-	nodeCommand := &NodeCommand{}
+	nodeCommand := &nodes.NodeCommand{}
 	decoder := json.NewDecoder(r.Body)
 	decoder.Decode(nodeCommand)
 
 	// insert struct-type and CommandID
-	nodeCommand.Type = NodeCommandType
+	nodeCommand.Type = nodes.NodeCommandType
 	nodeCommand.CommandID = nextCommandID
 	nextCommandID++
 
 	// check if the node exists
-	_, hasNode := nodes[nodeCommand.Address]
+	_, hasNode := nodeMap[nodeCommand.Address]
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
-	ack := NodeCommandACK{Type: NodeCommandACKType, CommandID: nodeCommand.CommandID, Ok: hasNode}
+	ack := nodes.NodeCommandACK{Type: nodes.NodeCommandACKType, CommandID: nodeCommand.CommandID, Ok: hasNode}
 	enc.Encode(ack)
 
 	if hasNode {
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
-		commands[nodeCommand.CommandID] = NewCommandBundle(nodeCommand, time.Second*3)
-
+		commands[nodeCommand.CommandID] = nodes.NewCommandTransfer(nodeCommand, serialOutput, commandTimeout)
 		pendingCommandLock.Unlock()
-		nodeCommand.SendTo(serialOutput)
 
 		// emit SSE-event
 		sseServer.NodeCommandEvent <- commandList()
@@ -265,10 +239,8 @@ func readSerial(s *serial.Port, output chan<- []byte) {
 			log.Fatal(err)
 			continue
 		}
-
 		message += string(buf[:n])
 		message = strings.Replace(message, "\r", "", -1)
-
 		lines := strings.Split(message, "\n")
 
 		// at least one complete line
@@ -301,11 +273,11 @@ func main() {
 	}
 
 	// make our global state maps
-	nodes = make(map[int][]Node)
+	nodeMap = make(map[int][]nodes.Node)
 	nodeTimers = make(map[int]*time.Timer)
-	commands = make(map[int]*CommandBundle)
+	commands = make(map[int]*nodes.CommandTransfer)
 
-	// create channel
+	// create serial IO-channels
 	serialInput = make(chan []byte)
 	serialOutput = make(chan []byte)
 
@@ -339,7 +311,7 @@ func main() {
 			break
 		}
 	}
-	// consume incoming data
+	// process incoming data
 	go readData(serialInput)
 
 	// deliver outgoing data to connected serials

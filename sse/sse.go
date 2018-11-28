@@ -46,6 +46,11 @@ func NewServer() (server *Server) {
 	return
 }
 
+// NumClients returns the number of connected clients
+func (server *Server) NumClients() int {
+	return len(server.clients)
+}
+
 // Listen on different channels and act accordingly
 func (server *Server) listen() {
 	// eventID := 0
@@ -86,7 +91,7 @@ func (server *Server) listen() {
 }
 
 func (server *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// Make sure that the writer supports flushing.
+	// make sure that the writer supports flushing.
 	flusher, ok := rw.(http.Flusher)
 
 	if !ok {
@@ -100,29 +105,30 @@ func (server *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	rw.Header().Set("Connection", "keep-alive")
 	rw.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Each connection registers its own message channel with the server's connections registry
+	// each connection registers its own message channel with the server's connections registry
 	messageChan := make(chan []byte)
 
-	// Signal the server that we have a new connection
+	// signal the server that we have a new connection
 	server.newClients <- messageChan
 
-	// Remove this client from the map of connected clients
-	// when this handler exits.
+	// remove client from map of connected clients when this handler exits.
 	defer func() {
 		server.closingClients <- messageChan
 	}()
 
 	// Listen to connection close and un-register messageChan
-	notify := rw.(http.CloseNotifier).CloseNotify()
-
-	go func() {
-		<-notify
-		server.closingClients <- messageChan
-	}()
+	notifyClose := rw.(http.CloseNotifier).CloseNotify()
+	running := true
 
 	// block waiting for messages broadcast on this connection's messageChan
-	for {
-		rw.Write(<-messageChan)
-		flusher.Flush()
+	for running {
+		select {
+		case msg := <-messageChan:
+			rw.Write(msg)
+			flusher.Flush()
+		case <-notifyClose:
+			running = false
+		}
+
 	}
 }

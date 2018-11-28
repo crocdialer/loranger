@@ -68,7 +68,7 @@ type NodeCommandACK struct {
 	Ok        bool       `json:"ok"`
 }
 
-// SendTo will encode a NoceCommand and put it into the provided channel
+// SendTo will encode a NodeCommand and put it into the provided channel
 func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 	jsonStr, err := json.Marshal(nc)
 
@@ -80,6 +80,31 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 		jsonStr = append(jsonStr, []byte("\n\n")...)
 		// jsonStr = append(jsonStr, '\n')
 		outChannel <- jsonStr
+	}
+}
+
+// CommandTransfer groups assets for pending commands
+type CommandTransfer struct {
+	Command *NodeCommand
+	Ticker  *time.Ticker
+	c       chan<- []byte
+	stamps  []time.Time
+}
+
+// NewCommandTransfer creates a new instance and sets up a periodic retransmit
+func NewCommandTransfer(command *NodeCommand, output chan<- []byte, retransmit time.Duration) (bundle *CommandTransfer) {
+	bundle = &CommandTransfer{Command: command, c: output, Ticker: time.NewTicker(retransmit)}
+	bundle.stamps = []time.Time{time.Now()}
+	bundle.Command.SendTo(bundle.c)
+	go bundle.transmit()
+	return bundle
+}
+
+func (cmd *CommandTransfer) transmit() {
+	for range cmd.Ticker.C {
+		cmd.stamps = append(cmd.stamps, time.Now())
+		// log.Printf("#%d resending:%v", len(cmd.stamps), cmd.Command)
+		cmd.Command.SendTo(cmd.c)
 	}
 }
 
