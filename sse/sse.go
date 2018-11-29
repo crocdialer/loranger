@@ -33,9 +33,9 @@ type Server struct {
 func NewServer() (server *Server) {
 	// Instantiate a server
 	server = &Server{
-		NodeEvent:        make(chan *nodes.Node),
-		NodeCommandEvent: make(chan []*nodes.CommandTransfer),
-		notifier:         make(chan []byte, 1),
+		NodeEvent:        make(chan *nodes.Node, 100),
+		NodeCommandEvent: make(chan []*nodes.CommandTransfer, 100),
+		notifier:         make(chan []byte, 100),
 		newClients:       make(chan chan []byte),
 		closingClients:   make(chan chan []byte),
 		clients:          make(map[chan []byte]bool),

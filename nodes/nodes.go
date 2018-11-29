@@ -96,13 +96,19 @@ type CommandTransfer struct {
 	Command *NodeCommand `json:"command"`
 	Ticker  *time.Ticker `json:"-"`
 	C       chan int     `json:"-"`
+	Done    chan bool    `json:"-"`
 	sink    chan<- []byte
 	Stamps  []time.Time `json:"stamps"`
 }
 
 // NewCommandTransfer creates a new instance and sets up a periodic retransmit
 func NewCommandTransfer(command *NodeCommand, output chan<- []byte, retransmit time.Duration) (bundle *CommandTransfer) {
-	bundle = &CommandTransfer{Command: command, sink: output, Ticker: time.NewTicker(retransmit), C: make(chan int, 100)}
+	bundle = &CommandTransfer{
+		Command: command,
+		sink:    output,
+		Ticker:  time.NewTicker(retransmit),
+		C:       make(chan int, 100),
+		Done:    make(chan bool)}
 	bundle.Stamps = []time.Time{time.Now()}
 	bundle.Command.SendTo(bundle.sink)
 	bundle.C <- len(bundle.Stamps)
@@ -116,11 +122,19 @@ func (cmd *CommandTransfer) String() string {
 }
 
 func (cmd *CommandTransfer) transmit() {
-	for t := range cmd.Ticker.C {
-		cmd.Stamps = append(cmd.Stamps, t)
-		// log.Printf("#%d resending:%v", len(cmd.Stamps), cmd.Command)
-		cmd.Command.SendTo(cmd.sink)
+	defer log.Println("transmit done", cmd.Command)
+
+	for {
 		cmd.C <- len(cmd.Stamps)
+
+		select {
+		case <-cmd.Done:
+			return
+		case t := <-cmd.Ticker.C:
+			cmd.Stamps = append(cmd.Stamps, t)
+			log.Printf("#%d resending:%v", len(cmd.Stamps), cmd.Command)
+			cmd.Command.SendTo(cmd.sink)
+		}
 	}
 }
 

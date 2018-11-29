@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crocdialer/loranger/nodes"
@@ -36,16 +37,22 @@ var nodeTimers map[int]*time.Timer
 var nodeTimeout = time.Second * 10
 
 // next command id
-var nextCommandID = 1
+var nextCommandID int32 = 1
 
 // pending commands (sent but unackknowledged)
 var commands map[int]*nodes.CommandTransfer
+
+// command channels for waiting and finished commands
+var commandsWaiting, commandsProcessing chan *nodes.CommandTransfer
+
+// do not process more than this at a time
+var maxNumConcurrantCommands = 3
 
 // keep track of issued commands
 var commandLog []nodes.CommandLogItem
 
 // retransmit timeout for commands
-var commandTimeout = time.Millisecond * 1900
+var commandTimeout = time.Millisecond * 2500
 
 // maximum number of command (re-)transmits
 var commandMaxNumTransmit = 10
@@ -56,6 +63,8 @@ var pendingCommandLock = sync.RWMutex{}
 var sseServer *sse.Server
 
 func commandList() []*nodes.CommandTransfer {
+	pendingCommandLock.RLock()
+	defer pendingCommandLock.RUnlock()
 	var cmdKeys []int
 
 	for k := range commands {
@@ -117,7 +126,7 @@ func readData(input chan []byte) {
 						pendingCommandLock.Lock()
 						// log.Println("received ACK for command:", commands[nodeCommandACK.CommandID])
 						if cmd, ok := commands[nodeCommandACK.CommandID]; ok {
-							cmd.Ticker.Stop()
+							cmd.Done <- true
 							commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
 								Attempts: len(cmd.Stamps), Stamp: time.Now()})
 						}
@@ -205,8 +214,7 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 
 	// insert struct-type and CommandID
 	nodeCommand.Type = nodes.NodeCommandType
-	nodeCommand.CommandID = nextCommandID
-	nextCommandID++
+	nodeCommand.CommandID = int(atomic.AddInt32(&nextCommandID, 1))
 
 	// check if the node exists
 	_, hasNode := nodeMap[nodeCommand.Address]
@@ -227,17 +235,13 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 		// emit SSE-events for changes, monitor number of retransmits
 		go func() {
 			for numTransmits := range commandTransfer.C {
-				if numTransmits > commandMaxNumTransmit {
+				if numTransmits >= commandMaxNumTransmit {
 					log.Println("node unreachable:", commandTransfer)
-
-					cmdID := commandTransfer.Command.CommandID
+					commandTransfer.Done <- true
 					pendingCommandLock.Lock()
-					if cmd, ok := commands[cmdID]; ok {
-						cmd.Ticker.Stop()
-						commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
-							Attempts: 0, Stamp: time.Now()})
-					}
-					delete(commands, cmdID)
+					commandLog = append(commandLog, nodes.CommandLogItem{Command: commandTransfer.Command,
+						Attempts: 0, Stamp: time.Now()})
+					delete(commands, commandTransfer.Command.CommandID)
 					pendingCommandLock.Unlock()
 				}
 				sseServer.NodeCommandEvent <- commandList()
