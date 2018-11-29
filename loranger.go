@@ -139,29 +139,32 @@ func readData(input chan []byte) {
 	}
 }
 
-// emit SSE-events for changes, monitor number of retransmits
-func processCommandTransfer(cmd *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
-
-	// start periodic transmission
-	go cmd.Transmit(commandTimeout)
-
-	for numTransmits := range cmd.C {
-		// log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
-		if numTransmits >= commandMaxNumTransmit {
-			log.Println("command failed, node unreachable:", cmd)
-			cmd.Done <- false
-
-			// remove unsuccessful command
-			results <- cmd
-		} else {
-			sseServer.NodeCommandEvent <- commandList()
-		}
-	}
-}
+// // emit SSE-events for changes, monitor number of retransmits
+// func processCommandTransfer(cmd *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
+//
+// 	// start periodic transmission
+// 	go cmd.Transmit(commandTimeout)
+//
+// 	for numTransmits := range cmd.C {
+// 		// log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
+// 		if numTransmits >= commandMaxNumTransmit {
+// 			log.Println("command failed, node unreachable:", cmd)
+// 			cmd.Done <- false
+//
+// 			// remove unsuccessful command
+// 			results <- cmd
+// 		} else {
+// 			sseServer.NodeCommandEvent <- commandList()
+// 		}
+// 	}
+// }
 
 func processCommandQueue(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
 	for cmd := range commands {
-		processCommandTransfer(cmd, results)
+		cmd.Transmit(results, func() {
+			// log.Println("hello update")
+			sseServer.NodeCommandEvent <- commandList()
+		})
 	}
 }
 
@@ -262,7 +265,8 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(ack)
 
 	if hasNode {
-		commandTransfer := nodes.NewCommandTransfer(nodeCommand, serialOutput)
+		commandTransfer := nodes.NewCommandTransfer(nodeCommand, serialOutput, commandMaxNumTransmit,
+			commandTimeout)
 
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()

@@ -94,22 +94,31 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 
 // CommandTransfer groups assets for pending commands
 type CommandTransfer struct {
-	Command *NodeCommand `json:"command"`
-	Stamps  []time.Time  `json:"stamps"`
-	Success bool         `json:"success"`
-	C       chan int     `json:"-"`
-	Done    chan bool    `json:"-"`
-	sink    chan<- []byte
-	ticker  *time.Ticker
+	Command     *NodeCommand
+	Stamps      []time.Time
+	Success     bool
+	Retransmits int
+	TimeOut     time.Duration
+	C           chan int
+	Done        chan bool
+	sink        chan<- []byte
+	ticker      *time.Ticker
 }
 
 // NewCommandTransfer creates a new instance and sets up a periodic retransmit
-func NewCommandTransfer(command *NodeCommand, output chan<- []byte) (bundle *CommandTransfer) {
+func NewCommandTransfer(
+	command *NodeCommand,
+	output chan<- []byte,
+	retransmits int,
+	timeOut time.Duration) (bundle *CommandTransfer) {
+
 	bundle = &CommandTransfer{
-		Command: command,
-		sink:    output,
-		C:       make(chan int, 100),
-		Done:    make(chan bool)}
+		Command:     command,
+		sink:        output,
+		Retransmits: retransmits,
+		TimeOut:     timeOut,
+		C:           make(chan int, 100),
+		Done:        make(chan bool)}
 
 	// creation time
 	bundle.Stamps = []time.Time{time.Now()}
@@ -121,8 +130,7 @@ func (cmd *CommandTransfer) String() string {
 		cmd.Command.CommandID, cmd.Command.Address, cmd.Command.Command, cmd.Command.Params, len(cmd.Stamps))
 }
 
-// Transmit will transmit the command and schedule periodic retransmits
-func (cmd *CommandTransfer) Transmit(retransmit time.Duration) {
+func (cmd *CommandTransfer) transmitWorker() {
 	// defer log.Println("transmit done:", cmd)
 
 	// initial send
@@ -130,7 +138,7 @@ func (cmd *CommandTransfer) Transmit(retransmit time.Duration) {
 	cmd.Command.SendTo(cmd.sink)
 
 	// start ticker
-	cmd.ticker = time.NewTicker(retransmit)
+	cmd.ticker = time.NewTicker(cmd.TimeOut)
 
 	for {
 		cmd.C <- len(cmd.Stamps)
@@ -143,6 +151,25 @@ func (cmd *CommandTransfer) Transmit(retransmit time.Duration) {
 		case t := <-cmd.ticker.C:
 			cmd.Stamps = append(cmd.Stamps, t)
 			cmd.Command.SendTo(cmd.sink)
+		}
+	}
+}
+
+// Transmit the command, issue update-events for changes, monitor number of retransmits
+func (cmd *CommandTransfer) Transmit(results chan<- *CommandTransfer, update func()) {
+	// start periodic transmission
+	go cmd.transmitWorker()
+
+	for numTransmits := range cmd.C {
+		log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
+		if numTransmits >= cmd.Retransmits {
+			log.Println("command failed, node unreachable:", cmd)
+			cmd.Done <- false
+
+			// remove unsuccessful command
+			results <- cmd
+		} else {
+			update()
 		}
 	}
 }
