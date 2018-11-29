@@ -94,25 +94,28 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 // CommandTransfer groups assets for pending commands
 type CommandTransfer struct {
 	Command *NodeCommand `json:"command"`
-	Ticker  *time.Ticker `json:"-"`
+	Stamps  []time.Time  `json:"stamps"`
 	C       chan int     `json:"-"`
 	Done    chan bool    `json:"-"`
 	sink    chan<- []byte
-	Stamps  []time.Time `json:"stamps"`
+	ticker  *time.Ticker
 }
 
 // NewCommandTransfer creates a new instance and sets up a periodic retransmit
-func NewCommandTransfer(command *NodeCommand, output chan<- []byte, retransmit time.Duration) (bundle *CommandTransfer) {
+func NewCommandTransfer(command *NodeCommand, output chan<- []byte) (bundle *CommandTransfer) {
 	bundle = &CommandTransfer{
 		Command: command,
 		sink:    output,
-		Ticker:  time.NewTicker(retransmit),
-		C:       make(chan int, 100),
-		Done:    make(chan bool)}
+		// Ticker:  time.NewTicker(retransmit),
+		C:    make(chan int, 100),
+		Done: make(chan bool)}
+
+	// creation time
 	bundle.Stamps = []time.Time{time.Now()}
-	bundle.Command.SendTo(bundle.sink)
-	bundle.C <- len(bundle.Stamps)
-	go bundle.transmit()
+
+	// bundle.Command.SendTo(bundle.sink)
+	// bundle.C <- len(bundle.Stamps)
+	// go bundle.transmit()
 	return bundle
 }
 
@@ -121,18 +124,27 @@ func (cmd *CommandTransfer) String() string {
 		cmd.Command.Command, cmd.Command.Params, len(cmd.Stamps))
 }
 
-func (cmd *CommandTransfer) transmit() {
-	defer log.Println("transmit done", cmd.Command)
+// Transmit will transmit the command and schedule periodic retransmits
+func (cmd *CommandTransfer) Transmit(retransmit time.Duration) {
+	defer log.Println("transmit done:", cmd)
+
+	// initial send
+	cmd.C <- len(cmd.Stamps)
+	cmd.Command.SendTo(cmd.sink)
+
+	// start ticker
+	cmd.ticker = time.NewTicker(retransmit)
 
 	for {
 		cmd.C <- len(cmd.Stamps)
 
 		select {
 		case <-cmd.Done:
+			close(cmd.C)
 			return
-		case t := <-cmd.Ticker.C:
+		case t := <-cmd.ticker.C:
 			cmd.Stamps = append(cmd.Stamps, t)
-			log.Printf("#%d resending:%v", len(cmd.Stamps), cmd.Command)
+			// log.Printf("#%d resending:%v", len(cmd.Stamps), cmd.Command)
 			cmd.Command.SendTo(cmd.sink)
 		}
 	}

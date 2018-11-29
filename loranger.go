@@ -43,7 +43,7 @@ var nextCommandID int32 = 1
 var commands map[int]*nodes.CommandTransfer
 
 // command channels for waiting and finished commands
-var commandsWaiting, commandsProcessing chan *nodes.CommandTransfer
+var commandQueue, commandsProcessing chan *nodes.CommandTransfer
 
 // do not process more than this at a time
 var maxNumConcurrantCommands = 3
@@ -141,6 +141,42 @@ func readData(input chan []byte) {
 	}
 }
 
+// emit SSE-events for changes, monitor number of retransmits
+func processCommandTransfer(cmd *nodes.CommandTransfer) {
+	log.Println("transmit start", cmd)
+
+	go cmd.Transmit(commandTimeout)
+
+	for numTransmits := range cmd.C {
+		if numTransmits >= commandMaxNumTransmit {
+			log.Println("node unreachable:", cmd)
+			cmd.Done <- true
+
+			// remove unsuccessful command
+			pendingCommandLock.Lock()
+			commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
+				Attempts: 0, Stamp: time.Now()})
+			delete(commands, cmd.Command.CommandID)
+			pendingCommandLock.Unlock()
+		}
+		sseServer.NodeCommandEvent <- commandList()
+	}
+}
+
+func processCommandQueue() {
+
+	go func() {
+		for cmd := range commandsProcessing {
+			go processCommandTransfer(cmd)
+		}
+	}()
+
+	for cmd := range commandQueue {
+		// will block if our processing channel is filled up
+		commandsProcessing <- cmd
+	}
+}
+
 // /nodes
 // /nodes/{nodeID:[0-9]+}
 // /nodes/{nodeID:[0-9]+}/log?duration=1h&granularity=10s
@@ -225,28 +261,34 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(ack)
 
 	if hasNode {
-		commandTransfer := nodes.NewCommandTransfer(nodeCommand, serialOutput, commandTimeout)
+		commandTransfer := nodes.NewCommandTransfer(nodeCommand, serialOutput)
 
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
 		commands[nodeCommand.CommandID] = commandTransfer
 		pendingCommandLock.Unlock()
 
-		// emit SSE-events for changes, monitor number of retransmits
-		go func() {
-			for numTransmits := range commandTransfer.C {
-				if numTransmits >= commandMaxNumTransmit {
-					log.Println("node unreachable:", commandTransfer)
-					commandTransfer.Done <- true
-					pendingCommandLock.Lock()
-					commandLog = append(commandLog, nodes.CommandLogItem{Command: commandTransfer.Command,
-						Attempts: 0, Stamp: time.Now()})
-					delete(commands, commandTransfer.Command.CommandID)
-					pendingCommandLock.Unlock()
-				}
-				sseServer.NodeCommandEvent <- commandList()
-			}
-		}()
+		// insert transfer into queue
+		commandQueue <- commandTransfer
+
+		// // emit SSE-events for changes, monitor number of retransmits
+		// go func() {
+		// 	defer func() {
+		// 		// log.Println("transmit check goroutine finished")
+		// 		pendingCommandLock.Lock()
+		// 		commandLog = append(commandLog, nodes.CommandLogItem{Command: commandTransfer.Command,
+		// 			Attempts: 0, Stamp: time.Now()})
+		// 		delete(commands, commandTransfer.Command.CommandID)
+		// 		pendingCommandLock.Unlock()
+		// 	}()
+		// 	for numTransmits := range commandTransfer.C {
+		// 		if numTransmits >= commandMaxNumTransmit {
+		// 			log.Println("node unreachable:", commandTransfer)
+		// 			commandTransfer.Done <- true
+		// 		}
+		// 		sseServer.NodeCommandEvent <- commandList()
+		// 	}
+		// }()
 	}
 }
 
@@ -326,6 +368,10 @@ func main() {
 	serialInput = make(chan []byte)
 	serialOutput = make(chan []byte)
 
+	// create command channels
+	commandQueue = make(chan *nodes.CommandTransfer, 100)
+	commandsProcessing = make(chan *nodes.CommandTransfer, maxNumConcurrantCommands)
+
 	files, err := ioutil.ReadDir("/dev")
 	if err != nil {
 		log.Fatal(err)
@@ -361,6 +407,9 @@ func main() {
 
 	// deliver outgoing data to connected serials
 	go writeData(serialOutput)
+
+	// start command processing
+	go processCommandQueue()
 
 	// serve static files
 	fs := http.FileServer(http.Dir(serveFilesPath))
