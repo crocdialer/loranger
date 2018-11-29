@@ -72,6 +72,7 @@ type NodeCommandACK struct {
 // CommandLogItem bundles information about one past command
 type CommandLogItem struct {
 	Command  *NodeCommand `json:"command"`
+	Success  bool         `json:"success"`
 	Attempts int          `json:"attempts"`
 	Stamp    time.Time    `json:"stamp"`
 }
@@ -95,6 +96,7 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 type CommandTransfer struct {
 	Command *NodeCommand `json:"command"`
 	Stamps  []time.Time  `json:"stamps"`
+	Success bool         `json:"success"`
 	C       chan int     `json:"-"`
 	Done    chan bool    `json:"-"`
 	sink    chan<- []byte
@@ -106,27 +108,22 @@ func NewCommandTransfer(command *NodeCommand, output chan<- []byte) (bundle *Com
 	bundle = &CommandTransfer{
 		Command: command,
 		sink:    output,
-		// Ticker:  time.NewTicker(retransmit),
-		C:    make(chan int, 100),
-		Done: make(chan bool)}
+		C:       make(chan int, 100),
+		Done:    make(chan bool)}
 
 	// creation time
 	bundle.Stamps = []time.Time{time.Now()}
-
-	// bundle.Command.SendTo(bundle.sink)
-	// bundle.C <- len(bundle.Stamps)
-	// go bundle.transmit()
 	return bundle
 }
 
 func (cmd *CommandTransfer) String() string {
-	return fmt.Sprintf("{id: %d -- command: %s -- params: %v -- attempts: %d}", cmd.Command.CommandID,
-		cmd.Command.Command, cmd.Command.Params, len(cmd.Stamps))
+	return fmt.Sprintf("{id: %d -- dst:%d -- command: %s -- params: %v -- attempts: %d}",
+		cmd.Command.CommandID, cmd.Command.Address, cmd.Command.Command, cmd.Command.Params, len(cmd.Stamps))
 }
 
 // Transmit will transmit the command and schedule periodic retransmits
 func (cmd *CommandTransfer) Transmit(retransmit time.Duration) {
-	defer log.Println("transmit done:", cmd)
+	// defer log.Println("transmit done:", cmd)
 
 	// initial send
 	cmd.C <- len(cmd.Stamps)
@@ -139,12 +136,12 @@ func (cmd *CommandTransfer) Transmit(retransmit time.Duration) {
 		cmd.C <- len(cmd.Stamps)
 
 		select {
-		case <-cmd.Done:
+		case cmd.Success = <-cmd.Done:
+			cmd.ticker.Stop()
 			close(cmd.C)
 			return
 		case t := <-cmd.ticker.C:
 			cmd.Stamps = append(cmd.Stamps, t)
-			// log.Printf("#%d resending:%v", len(cmd.Stamps), cmd.Command)
 			cmd.Command.SendTo(cmd.sink)
 		}
 	}

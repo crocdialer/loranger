@@ -42,8 +42,8 @@ var nextCommandID int32 = 1
 // pending commands (sent but unackknowledged)
 var commands map[int]*nodes.CommandTransfer
 
-// command channels for waiting and finished commands
-var commandQueue, commandsProcessing chan *nodes.CommandTransfer
+// command channels for pending and finished commands
+var commandQueue, commandsDone chan *nodes.CommandTransfer
 
 // do not process more than this at a time
 var maxNumConcurrantCommands = 3
@@ -123,15 +123,13 @@ func readData(input chan []byte) {
 					log.Println("could not parse data as json:", string(line))
 				} else {
 					if nodeCommandACK.Ok {
-						pendingCommandLock.Lock()
+						pendingCommandLock.RLock()
 						// log.Println("received ACK for command:", commands[nodeCommandACK.CommandID])
 						if cmd, ok := commands[nodeCommandACK.CommandID]; ok {
 							cmd.Done <- true
-							commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
-								Attempts: len(cmd.Stamps), Stamp: time.Now()})
+							commandsDone <- cmd
 						}
-						delete(commands, nodeCommandACK.CommandID)
-						pendingCommandLock.Unlock()
+						pendingCommandLock.RUnlock()
 					}
 					// emit SSE-event
 					sseServer.NodeCommandEvent <- commandList()
@@ -142,38 +140,41 @@ func readData(input chan []byte) {
 }
 
 // emit SSE-events for changes, monitor number of retransmits
-func processCommandTransfer(cmd *nodes.CommandTransfer) {
-	log.Println("transmit start", cmd)
+func processCommandTransfer(cmd *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
 
+	// start periodic transmission
 	go cmd.Transmit(commandTimeout)
 
 	for numTransmits := range cmd.C {
+		// log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
 		if numTransmits >= commandMaxNumTransmit {
-			log.Println("node unreachable:", cmd)
-			cmd.Done <- true
+			log.Println("command failed, node unreachable:", cmd)
+			cmd.Done <- false
 
 			// remove unsuccessful command
-			pendingCommandLock.Lock()
-			commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
-				Attempts: 0, Stamp: time.Now()})
-			delete(commands, cmd.Command.CommandID)
-			pendingCommandLock.Unlock()
+			results <- cmd
+		} else {
+			sseServer.NodeCommandEvent <- commandList()
 		}
-		sseServer.NodeCommandEvent <- commandList()
 	}
 }
 
-func processCommandQueue() {
+func processCommandQueue(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
+	for cmd := range commands {
+		processCommandTransfer(cmd, results)
+	}
+}
 
-	go func() {
-		for cmd := range commandsProcessing {
-			go processCommandTransfer(cmd)
-		}
-	}()
+func collectCommands() {
+	for cmd := range commandsDone {
+		pendingCommandLock.Lock()
+		commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
+			Success: cmd.Success, Attempts: len(cmd.Stamps), Stamp: time.Now()})
+		delete(commands, cmd.Command.CommandID)
+		pendingCommandLock.Unlock()
 
-	for cmd := range commandQueue {
-		// will block if our processing channel is filled up
-		commandsProcessing <- cmd
+		// emit SSE update
+		sseServer.NodeCommandEvent <- commandList()
 	}
 }
 
@@ -270,25 +271,6 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 
 		// insert transfer into queue
 		commandQueue <- commandTransfer
-
-		// // emit SSE-events for changes, monitor number of retransmits
-		// go func() {
-		// 	defer func() {
-		// 		// log.Println("transmit check goroutine finished")
-		// 		pendingCommandLock.Lock()
-		// 		commandLog = append(commandLog, nodes.CommandLogItem{Command: commandTransfer.Command,
-		// 			Attempts: 0, Stamp: time.Now()})
-		// 		delete(commands, commandTransfer.Command.CommandID)
-		// 		pendingCommandLock.Unlock()
-		// 	}()
-		// 	for numTransmits := range commandTransfer.C {
-		// 		if numTransmits >= commandMaxNumTransmit {
-		// 			log.Println("node unreachable:", commandTransfer)
-		// 			commandTransfer.Done <- true
-		// 		}
-		// 		sseServer.NodeCommandEvent <- commandList()
-		// 	}
-		// }()
 	}
 }
 
@@ -370,7 +352,7 @@ func main() {
 
 	// create command channels
 	commandQueue = make(chan *nodes.CommandTransfer, 100)
-	commandsProcessing = make(chan *nodes.CommandTransfer, maxNumConcurrantCommands)
+	commandsDone = make(chan *nodes.CommandTransfer, 100)
 
 	files, err := ioutil.ReadDir("/dev")
 	if err != nil {
@@ -409,7 +391,10 @@ func main() {
 	go writeData(serialOutput)
 
 	// start command processing
-	go processCommandQueue()
+	for i := 0; i < maxNumConcurrantCommands; i++ {
+		go processCommandQueue(commandQueue, commandsDone)
+	}
+	go collectCommands()
 
 	// serve static files
 	fs := http.FileServer(http.Dir(serveFilesPath))
