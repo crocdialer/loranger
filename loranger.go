@@ -159,7 +159,7 @@ func readData(input chan []byte) {
 // 	}
 // }
 
-func processCommandQueue(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
+func commandQueueWorker(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
 	for cmd := range commands {
 		cmd.Transmit(results, func() {
 			// log.Println("hello update")
@@ -396,7 +396,7 @@ func main() {
 
 	// start command processing
 	for i := 0; i < maxNumConcurrantCommands; i++ {
-		go processCommandQueue(commandQueue, commandsDone)
+		go commandQueueWorker(commandQueue, commandsDone)
 	}
 	go collectCommands()
 

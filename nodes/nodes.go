@@ -94,13 +94,13 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 
 // CommandTransfer groups assets for pending commands
 type CommandTransfer struct {
-	Command     *NodeCommand
-	Stamps      []time.Time
-	Success     bool
-	Retransmits int
-	TimeOut     time.Duration
-	C           chan int
-	Done        chan bool
+	Command     *NodeCommand  `json:"command"`
+	Stamps      []time.Time   `json:"stamps"`
+	Success     bool          `json:"success"`
+	C           chan int      `json:"-"`
+	Done        chan bool     `json:"-"`
+	Retransmits int           `json:"retransmits"`
+	TimeOut     time.Duration `json:"timeout"`
 	sink        chan<- []byte
 	ticker      *time.Ticker
 }
@@ -161,7 +161,7 @@ func (cmd *CommandTransfer) Transmit(results chan<- *CommandTransfer, update fun
 	go cmd.transmitWorker()
 
 	for numTransmits := range cmd.C {
-		log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
+		// log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
 		if numTransmits >= cmd.Retransmits {
 			log.Println("command failed, node unreachable:", cmd)
 			cmd.Done <- false
