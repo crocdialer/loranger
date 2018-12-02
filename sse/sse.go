@@ -9,12 +9,12 @@ import (
 )
 
 // A Server holds open client connections,
-// listens for incoming events on its NodeEvent and NodeCommandEvent channels
+// listens for incoming events on its NodeEvent and CommandEvent channels
 // and broadcasts event data to all registered connections
 type Server struct {
 	NodeEvent chan *nodes.Node
 
-	NodeCommandEvent chan []*nodes.CommandTransfer
+	CommandEvent chan []*nodes.CommandTransfer
 
 	// Events are pushed to this channel by the main events-gathering routine
 	notifier chan []byte
@@ -33,12 +33,12 @@ type Server struct {
 func NewServer() (server *Server) {
 	// Instantiate a server
 	server = &Server{
-		NodeEvent:        make(chan *nodes.Node, 100),
-		NodeCommandEvent: make(chan []*nodes.CommandTransfer, 100),
-		notifier:         make(chan []byte, 100),
-		newClients:       make(chan chan []byte),
-		closingClients:   make(chan chan []byte),
-		clients:          make(map[chan []byte]bool),
+		NodeEvent:      make(chan *nodes.Node, 100),
+		CommandEvent:   make(chan []*nodes.CommandTransfer, 100),
+		notifier:       make(chan []byte, 100),
+		newClients:     make(chan chan []byte),
+		closingClients: make(chan chan []byte),
+		clients:        make(map[chan []byte]bool),
 	}
 
 	// Set it running - listening and broadcasting events
@@ -74,11 +74,11 @@ func (server *Server) listen() {
 				// send out NodeEvent
 				server.notifier <- []byte(sseBLob)
 			}
-		case commandList := <-server.NodeCommandEvent:
+		case commandList := <-server.CommandEvent:
 			if jsonNode, err := json.Marshal(commandList); err == nil {
 				sseBLob := fmt.Sprintf("event: commands\ndata: %s\n\n", jsonNode)
 
-				// send out NodeCommandEvent
+				// send out CommandEvent
 				server.notifier <- []byte(sseBLob)
 			}
 		case event := <-server.notifier:
@@ -118,16 +118,15 @@ func (server *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Listen to connection close and un-register messageChan
 	notifyClose := rw.(http.CloseNotifier).CloseNotify()
-	running := true
 
 	// block waiting for messages broadcast on this connection's messageChan
-	for running {
+	for {
 		select {
 		case msg := <-messageChan:
 			rw.Write(msg)
 			flusher.Flush()
 		case <-notifyClose:
-			running = false
+			return
 		}
 
 	}

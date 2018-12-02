@@ -20,11 +20,28 @@ import (
 	"github.com/tarm/serial"
 )
 
+// http listen port
 var port = 8080
+
+// static serve directory
 var serveFilesPath = "./public"
+
+// inactivity timeout for Nodes
+var nodeTimeout = time.Second * 10
+
+// do not process more commands at a time
+var maxNumConcurrantCommands = 3
+
+// retransmit timeout for commands
+var commandTimeout = time.Millisecond * 2500
+
+// maximum number of command (re-)transmits
+var commandMaxNumTransmit = 10
+
+// slice of connected serials
 var serialDevices []*serial.Port
 
-// create serial channels
+// serial IO channels
 var serialInput, serialOutput chan []byte
 
 // nodes
@@ -32,9 +49,6 @@ var nodeMap map[int][]nodes.Node
 
 // deadline timers for active Nodes
 var nodeTimers map[int]*time.Timer
-
-// inactivity timeout for Nodes
-var nodeTimeout = time.Second * 10
 
 // next command id
 var nextCommandID int32 = 1
@@ -45,17 +59,8 @@ var commands map[int]*nodes.CommandTransfer
 // command channels for pending and finished commands
 var commandQueue, commandsDone chan *nodes.CommandTransfer
 
-// do not process more than this at a time
-var maxNumConcurrantCommands = 3
-
 // keep track of issued commands
 var commandLog []nodes.CommandLogItem
-
-// retransmit timeout for commands
-var commandTimeout = time.Millisecond * 2500
-
-// maximum number of command (re-)transmits
-var commandMaxNumTransmit = 10
 
 var pendingCommandLock = sync.RWMutex{}
 
@@ -117,58 +122,37 @@ func readData(input chan []byte) {
 						sseServer.NodeEvent <- &newState
 					})
 				}
-			case nodes.NodeCommandACKType:
-				var nodeCommandACK nodes.NodeCommandACK
-				if err := json.Unmarshal(line, &nodeCommandACK); err != nil {
+			case nodes.CommandACKType:
+				var commandACK nodes.CommandACK
+				if err := json.Unmarshal(line, &commandACK); err != nil {
 					log.Println("could not parse data as json:", string(line))
 				} else {
-					if nodeCommandACK.Ok {
+					if commandACK.Ok {
 						pendingCommandLock.RLock()
-						// log.Println("received ACK for command:", commands[nodeCommandACK.CommandID])
-						if cmd, ok := commands[nodeCommandACK.CommandID]; ok {
+						// log.Println("received ACK for command:", commands[CommandACK.CommandID])
+						if cmd, ok := commands[commandACK.CommandID]; ok {
 							cmd.Done <- true
 							commandsDone <- cmd
 						}
 						pendingCommandLock.RUnlock()
 					}
 					// emit SSE-event
-					sseServer.NodeCommandEvent <- commandList()
+					sseServer.CommandEvent <- commandList()
 				}
 			}
 		}
 	}
 }
 
-// // emit SSE-events for changes, monitor number of retransmits
-// func processCommandTransfer(cmd *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
-//
-// 	// start periodic transmission
-// 	go cmd.Transmit(commandTimeout)
-//
-// 	for numTransmits := range cmd.C {
-// 		// log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
-// 		if numTransmits >= commandMaxNumTransmit {
-// 			log.Println("command failed, node unreachable:", cmd)
-// 			cmd.Done <- false
-//
-// 			// remove unsuccessful command
-// 			results <- cmd
-// 		} else {
-// 			sseServer.NodeCommandEvent <- commandList()
-// 		}
-// 	}
-// }
-
 func commandQueueWorker(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
 	for cmd := range commands {
 		cmd.Transmit(results, func() {
-			// log.Println("hello update")
-			sseServer.NodeCommandEvent <- commandList()
+			sseServer.CommandEvent <- commandList()
 		})
 	}
 }
 
-func collectCommands() {
+func commandQueueCollector() {
 	for cmd := range commandsDone {
 		pendingCommandLock.Lock()
 		commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
@@ -177,7 +161,7 @@ func collectCommands() {
 		pendingCommandLock.Unlock()
 
 		// emit SSE update
-		sseServer.NodeCommandEvent <- commandList()
+		sseServer.CommandEvent <- commandList()
 	}
 }
 
@@ -240,7 +224,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST
-func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
+func handleCommand(w http.ResponseWriter, r *http.Request) {
 
 	// configure proper CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -248,29 +232,29 @@ func handleNodeCommand(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 	// decode json-request
-	nodeCommand := &nodes.NodeCommand{}
+	command := &nodes.Command{}
 	decoder := json.NewDecoder(r.Body)
-	decoder.Decode(nodeCommand)
+	decoder.Decode(command)
 
 	// insert struct-type and CommandID
-	nodeCommand.Type = nodes.NodeCommandType
-	nodeCommand.CommandID = int(atomic.AddInt32(&nextCommandID, 1))
+	command.Type = nodes.CommandType
+	command.CommandID = int(atomic.AddInt32(&nextCommandID, 1))
 
 	// check if the node exists
-	_, hasNode := nodeMap[nodeCommand.Address]
+	_, hasNode := nodeMap[command.Address]
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
-	ack := nodes.NodeCommandACK{Type: nodes.NodeCommandACKType, CommandID: nodeCommand.CommandID, Ok: hasNode}
+	ack := nodes.CommandACK{Type: nodes.CommandACKType, CommandID: command.CommandID, Ok: hasNode}
 	enc.Encode(ack)
 
 	if hasNode {
-		commandTransfer := nodes.NewCommandTransfer(nodeCommand, serialOutput, commandMaxNumTransmit,
+		commandTransfer := nodes.NewCommandTransfer(command, serialOutput, commandMaxNumTransmit,
 			commandTimeout)
 
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
-		commands[nodeCommand.CommandID] = commandTransfer
+		commands[command.CommandID] = commandTransfer
 		pendingCommandLock.Unlock()
 
 		// insert transfer into queue
@@ -320,7 +304,7 @@ func readSerial(s *serial.Port, output chan<- []byte) {
 	}
 }
 
-func writeData(input chan []byte) {
+func writeData(input <-chan []byte) {
 	for bytes := range input {
 		for _, s := range serialDevices {
 			s.Write(bytes)
@@ -398,7 +382,7 @@ func main() {
 	for i := 0; i < maxNumConcurrantCommands; i++ {
 		go commandQueueWorker(commandQueue, commandsDone)
 	}
-	go collectCommands()
+	go commandQueueCollector()
 
 	// serve static files
 	fs := http.FileServer(http.Dir(serveFilesPath))
@@ -412,7 +396,7 @@ func main() {
 	// services dealing with lora-nodes
 	muxRouter.Handle("/events", sseServer)
 	muxRouter.HandleFunc("/nodes", handleNodes)
-	muxRouter.HandleFunc("/nodes/cmd", handleNodeCommand).Methods("POST", "OPTIONS")
+	muxRouter.HandleFunc("/nodes/cmd", handleCommand).Methods("POST", "OPTIONS")
 	muxRouter.HandleFunc("/nodes/cmd/pending", handlePendingCommands)
 	muxRouter.HandleFunc("/nodes/cmd/log", handleCommandLog)
 	muxRouter.HandleFunc("/nodes/{nodeID:[0-9]+}", handleNodes)

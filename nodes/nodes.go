@@ -14,18 +14,18 @@ const (
 	// NodeType is used as type field by Node structs
 	NodeType StructType = 1 << 0
 
-	// NodeCommandType is used as type field by NodeCommand structs
-	NodeCommandType StructType = 1 << 1
+	// CommandType is used as type field by Command structs
+	CommandType StructType = 1 << 1
 
-	// NodeCommandACKType is used as type field by NodeCommandACK structs
-	NodeCommandACKType StructType = 1 << 2
+	// CommandACKType is used as type field by CommandACK structs
+	CommandACKType StructType = 1 << 2
 )
 
 func (structType StructType) String() string {
 	names := map[StructType]string{
-		NodeType:           "Node",
-		NodeCommandType:    "NodeCommand",
-		NodeCommandACKType: "NodeCommandACK"}
+		NodeType:       "Node",
+		CommandType:    "Command",
+		CommandACKType: "CommandACK"}
 	str, ok := names[structType]
 	if ok {
 		return str
@@ -53,8 +53,8 @@ type Node struct {
 	GpsPosition  [2]float64 `json:"gps"`
 }
 
-// NodeCommand realizes a simple RPC interface
-type NodeCommand struct {
+// Command realizes a simple RPC interface
+type Command struct {
 	Type      StructType    `json:"type"`
 	CommandID int           `json:"cmd_id"`
 	Address   int           `json:"dst"`
@@ -62,8 +62,8 @@ type NodeCommand struct {
 	Params    []interface{} `json:"params"`
 }
 
-// NodeCommandACK is used as simple ACK for received commands
-type NodeCommandACK struct {
+// CommandACK is used as simple ACK for received commands
+type CommandACK struct {
 	Type      StructType `json:"type"`
 	CommandID int        `json:"cmd_id"`
 	Ok        bool       `json:"ok"`
@@ -71,18 +71,18 @@ type NodeCommandACK struct {
 
 // CommandLogItem bundles information about one past command
 type CommandLogItem struct {
-	Command  *NodeCommand `json:"command"`
-	Success  bool         `json:"success"`
-	Attempts int          `json:"attempts"`
-	Stamp    time.Time    `json:"stamp"`
+	Command  *Command  `json:"command"`
+	Success  bool      `json:"success"`
+	Attempts int       `json:"attempts"`
+	Stamp    time.Time `json:"stamp"`
 }
 
-// SendTo will encode a NodeCommand and put it into the provided channel
-func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
+// SendTo will encode a Command and put it into the provided channel
+func (nc *Command) SendTo(outChannel chan<- []byte) {
 	jsonStr, err := json.Marshal(nc)
 
 	if err != nil {
-		log.Println("could not marshal NodeCommand:", nc)
+		log.Println("could not marshal Command:", nc)
 	} else {
 		// send command
 		// log.Println("sending command:", string(jsonStr))
@@ -94,20 +94,20 @@ func (nc *NodeCommand) SendTo(outChannel chan<- []byte) {
 
 // CommandTransfer groups assets for pending commands
 type CommandTransfer struct {
-	Command     *NodeCommand  `json:"command"`
+	Command     *Command      `json:"command"`
 	Stamps      []time.Time   `json:"stamps"`
 	Success     bool          `json:"success"`
-	C           chan int      `json:"-"`
-	Done        chan bool     `json:"-"`
 	Retransmits int           `json:"retransmits"`
 	TimeOut     time.Duration `json:"timeout"`
+	C           chan int      `json:"-"`
+	Done        chan bool     `json:"-"`
 	sink        chan<- []byte
 	ticker      *time.Ticker
 }
 
 // NewCommandTransfer creates a new instance and sets up a periodic retransmit
 func NewCommandTransfer(
-	command *NodeCommand,
+	command *Command,
 	output chan<- []byte,
 	retransmits int,
 	timeOut time.Duration) (bundle *CommandTransfer) {
@@ -168,7 +168,7 @@ func (cmd *CommandTransfer) Transmit(results chan<- *CommandTransfer, update fun
 
 			// remove unsuccessful command
 			results <- cmd
-		} else {
+		} else if update != nil {
 			update()
 		}
 	}
