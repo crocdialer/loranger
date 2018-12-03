@@ -130,35 +130,10 @@ func (cmd *CommandTransfer) String() string {
 		cmd.Command.CommandID, cmd.Command.Address, cmd.Command.Command, cmd.Command.Params, len(cmd.Stamps))
 }
 
-func (cmd *CommandTransfer) transmitWorker() {
-	// defer log.Println("transmit done:", cmd)
-
-	// initial send
-	cmd.C <- len(cmd.Stamps)
-	cmd.Command.SendTo(cmd.sink)
-
-	// start ticker
-	cmd.ticker = time.NewTicker(cmd.TimeOut)
-
-	for {
-		cmd.C <- len(cmd.Stamps)
-
-		select {
-		case cmd.Success = <-cmd.Done:
-			cmd.ticker.Stop()
-			close(cmd.C)
-			return
-		case t := <-cmd.ticker.C:
-			cmd.Stamps = append(cmd.Stamps, t)
-			cmd.Command.SendTo(cmd.sink)
-		}
-	}
-}
-
 // Transmit the command, issue update-events for changes, monitor number of retransmits
 func (cmd *CommandTransfer) Transmit(results chan<- *CommandTransfer, update func()) {
 	// start periodic transmission
-	go cmd.transmitWorker()
+	go transmitWorker(cmd)
 
 	for numTransmits := range cmd.C {
 		// log.Printf("#%d sending:%v", len(cmd.Stamps), cmd.Command)
@@ -170,6 +145,30 @@ func (cmd *CommandTransfer) Transmit(results chan<- *CommandTransfer, update fun
 			results <- cmd
 		} else if update != nil {
 			update()
+		}
+	}
+}
+
+func transmitWorker(cmd *CommandTransfer) {
+	// defer log.Println("transmit done:", cmd)
+
+	// initial send
+	cmd.C <- len(cmd.Stamps)
+	cmd.Command.SendTo(cmd.sink)
+
+	// start ticker
+	cmd.ticker = time.NewTicker(cmd.TimeOut)
+
+	for {
+		select {
+		case cmd.Success = <-cmd.Done:
+			cmd.ticker.Stop()
+			close(cmd.C)
+			return
+		case t := <-cmd.ticker.C:
+			cmd.C <- len(cmd.Stamps)
+			cmd.Stamps = append(cmd.Stamps, t)
+			cmd.Command.SendTo(cmd.sink)
 		}
 	}
 }
