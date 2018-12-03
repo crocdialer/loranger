@@ -56,10 +56,10 @@ type Node struct {
 // Command realizes a simple RPC interface
 type Command struct {
 	Type      StructType    `json:"type"`
-	CommandID int           `json:"cmd_id"`
+	CommandID int           `json:"id"`
 	Address   int           `json:"dst"`
 	Command   string        `json:"cmd"`
-	Params    []interface{} `json:"params"`
+	Arguments []interface{} `json:"arg"`
 }
 
 // CommandACK is used as simple ACK for received commands
@@ -126,8 +126,8 @@ func NewCommandTransfer(
 }
 
 func (cmd *CommandTransfer) String() string {
-	return fmt.Sprintf("{id: %d -- dst:%d -- command: %s -- params: %v -- attempts: %d}",
-		cmd.Command.CommandID, cmd.Command.Address, cmd.Command.Command, cmd.Command.Params, len(cmd.Stamps))
+	return fmt.Sprintf("{id: %d -- dst:%d -- command: %s -- args: %v -- attempts: %d}",
+		cmd.Command.CommandID, cmd.Command.Address, cmd.Command.Command, cmd.Command.Arguments, len(cmd.Stamps))
 }
 
 // Transmit the command, issue update-events for changes, monitor number of retransmits
