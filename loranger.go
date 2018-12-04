@@ -237,7 +237,6 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	decoder.Decode(command)
 
 	// insert struct-type and CommandID
-	command.Type = nodes.CommandType
 	command.CommandID = int(atomic.AddInt32(&nextCommandID, 1))
 
 	// check if the node exists
@@ -245,7 +244,7 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
-	ack := nodes.CommandACK{Type: nodes.CommandACKType, CommandID: command.CommandID, Ok: hasNode}
+	ack := nodes.CommandACK{CommandID: command.CommandID, Ok: hasNode}
 	enc.Encode(ack)
 
 	if hasNode {

@@ -40,7 +40,6 @@ type TypeHelper struct {
 
 // Node structures information of a remote device
 type Node struct {
-	Type         StructType `json:"type"`
 	Address      int        `json:"address"`
 	ID           string     `json:"id"`
 	LastRssi     int        `json:"rssi"`
@@ -55,7 +54,6 @@ type Node struct {
 
 // Command realizes a simple RPC interface
 type Command struct {
-	Type      StructType    `json:"type"`
 	CommandID int           `json:"id"`
 	Address   int           `json:"dst"`
 	Command   string        `json:"cmd"`
@@ -64,9 +62,8 @@ type Command struct {
 
 // CommandACK is used as simple ACK for received commands
 type CommandACK struct {
-	Type      StructType `json:"type"`
-	CommandID int        `json:"cmd_id"`
-	Ok        bool       `json:"ok"`
+	CommandID int  `json:"id"`
+	Ok        bool `json:"ok"`
 }
 
 // CommandLogItem bundles information about one past command
