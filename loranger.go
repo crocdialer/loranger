@@ -90,14 +90,18 @@ func readData(input chan []byte) {
 
 		var typeHelper nodes.TypeHelper
 		if err := json.Unmarshal(line, &typeHelper); err != nil {
-			log.Println("could not extract struct-type from data", string(line))
+			log.Println("invalid json", string(line))
 		} else {
 			switch typeHelper.Type {
 			case nodes.NodeType:
 				var node nodes.Node
 				if err := json.Unmarshal(line, &node); err != nil {
-					log.Println("could not parse data as json:", string(line))
+					log.Println("invalid json:", string(line))
 				} else {
+					// no ID contained, keep the last one
+					if node.ID == "" && len(nodeMap[node.Address]) > 0 {
+						node.ID = nodeMap[node.Address][len(nodeMap[node.Address])-1].ID
+					}
 					node.Active = true
 					node.TimeStamp = time.Now()
 					nodeMap[node.Address] = append(nodeMap[node.Address], node)
@@ -125,7 +129,7 @@ func readData(input chan []byte) {
 			case nodes.CommandACKType:
 				var commandACK nodes.CommandACK
 				if err := json.Unmarshal(line, &commandACK); err != nil {
-					log.Println("could not parse data as json:", string(line))
+					log.Println("invalid json:", string(line))
 				} else {
 					if commandACK.Ok {
 						pendingCommandLock.RLock()
@@ -139,6 +143,8 @@ func readData(input chan []byte) {
 					// emit SSE-event
 					sseServer.CommandEvent <- commandList()
 				}
+			default:
+				log.Println("unknown data format", string(line))
 			}
 		}
 	}
