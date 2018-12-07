@@ -127,8 +127,9 @@ func (cmd *CommandTransfer) String() string {
 		cmd.Command.CommandID, cmd.Command.Address, cmd.Command.Command, cmd.Command.Arguments, len(cmd.Stamps))
 }
 
-// Transmit the command, issue update-events for changes, monitor number of retransmits
-func (cmd *CommandTransfer) Transmit(results chan<- *CommandTransfer, update func()) {
+// Start will start the command-transmission, monitor number of retransmits
+// and issue update-events for changes using the provided update-function object
+func (cmd *CommandTransfer) Start(results chan<- *CommandTransfer, update func()) {
 	// start periodic transmission
 	go transmitWorker(cmd)
 

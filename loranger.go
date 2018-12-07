@@ -54,7 +54,7 @@ var nodeTimers map[int]*time.Timer
 var nextCommandID int32 = 1
 
 // pending commands (sent but unackknowledged)
-var commands map[int]*nodes.CommandTransfer
+var commandTransfers map[int]*nodes.CommandTransfer
 
 // command channels for pending and finished commands
 var commandQueue, commandsDone chan *nodes.CommandTransfer
@@ -72,14 +72,14 @@ func commandList() []*nodes.CommandTransfer {
 	defer pendingCommandLock.RUnlock()
 	var cmdKeys []int
 
-	for k := range commands {
+	for k := range commandTransfers {
 		cmdKeys = append(cmdKeys, k)
 	}
 	sort.Ints(cmdKeys)
-	cmdList := make([]*nodes.CommandTransfer, len(commands))
+	cmdList := make([]*nodes.CommandTransfer, len(commandTransfers))
 
 	for i, k := range cmdKeys {
-		cmdList[i] = commands[k]
+		cmdList[i] = commandTransfers[k]
 	}
 	return cmdList
 }
@@ -134,7 +134,7 @@ func readData(input chan []byte) {
 					if commandACK.Ok {
 						pendingCommandLock.RLock()
 						// log.Println("received ACK for command:", commands[CommandACK.CommandID])
-						if cmd, ok := commands[commandACK.CommandID]; ok {
+						if cmd, ok := commandTransfers[commandACK.CommandID]; ok {
 							cmd.Done <- true
 							commandsDone <- cmd
 						}
@@ -151,8 +151,8 @@ func readData(input chan []byte) {
 }
 
 func commandQueueWorker(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
-	for cmd := range commands {
-		cmd.Transmit(results, func() {
+	for cmdTransfer := range commands {
+		cmdTransfer.Start(results, func() {
 			sseServer.CommandEvent <- commandList()
 		})
 	}
@@ -163,7 +163,7 @@ func commandQueueCollector() {
 		pendingCommandLock.Lock()
 		commandLog = append(commandLog, nodes.CommandLogItem{Command: cmd.Command,
 			Success: cmd.Success, Attempts: len(cmd.Stamps), Stamp: time.Now()})
-		delete(commands, cmd.Command.CommandID)
+		delete(commandTransfers, cmd.Command.CommandID)
 		pendingCommandLock.Unlock()
 
 		// emit SSE update
@@ -254,16 +254,16 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(ack)
 
 	if hasNode {
-		commandTransfer := nodes.NewCommandTransfer(command, serialOutput, commandMaxNumTransmit,
+		newCmdTransfer := nodes.NewCommandTransfer(command, serialOutput, commandMaxNumTransmit,
 			commandTimeout)
 
 		// lock mutex and keep track of the command
 		pendingCommandLock.Lock()
-		commands[command.CommandID] = commandTransfer
+		commandTransfers[command.CommandID] = newCmdTransfer
 		pendingCommandLock.Unlock()
 
 		// insert transfer into queue
-		commandQueue <- commandTransfer
+		commandQueue <- newCmdTransfer
 	}
 }
 
@@ -336,7 +336,7 @@ func main() {
 	// make our global state maps
 	nodeMap = make(map[int][]nodes.Node)
 	nodeTimers = make(map[int]*time.Timer)
-	commands = make(map[int]*nodes.CommandTransfer)
+	commandTransfers = make(map[int]*nodes.CommandTransfer)
 	commandLog = []nodes.CommandLogItem{}
 
 	// create serial IO-channels
