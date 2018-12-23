@@ -98,9 +98,19 @@ func readData(input chan []byte) {
 				if err := json.Unmarshal(line, &node); err != nil {
 					log.Println("invalid json:", string(line))
 				} else {
+					var lastNode *nodes.Node
+
+					if len(nodeMap[node.Address]) > 0 {
+						lastNode = &nodeMap[node.Address][len(nodeMap[node.Address])-1]
+					}
+
 					// no ID contained, keep the last one
-					if node.ID == "" && len(nodeMap[node.Address]) > 0 {
-						node.ID = nodeMap[node.Address][len(nodeMap[node.Address])-1].ID
+					if node.ID == "" && lastNode != nil {
+						node.ID = lastNode.ID
+					}
+					// no location contained, keep last one
+					if !node.HasLocation() && lastNode != nil {
+						node.Location = lastNode.Location
 					}
 					node.Active = true
 					node.TimeStamp = time.Now()

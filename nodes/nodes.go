@@ -26,8 +26,7 @@ func (structType StructType) String() string {
 		NodeType:       "Node",
 		CommandType:    "Command",
 		CommandACKType: "CommandACK"}
-	str, ok := names[structType]
-	if ok {
+	if str, ok := names[structType]; ok {
 		return str
 	}
 	return "Unknown"
@@ -40,16 +39,23 @@ type TypeHelper struct {
 
 // Node structures information of a remote device
 type Node struct {
-	Address      int        `json:"address"`
-	ID           string     `json:"id"`
-	LastRssi     int        `json:"rssi"`
-	Frequency    float64    `json:"freq"`
-	Mode         int        `json:"mode"`
-	Temperature  float64    `json:"temp"`
-	BatteryLevel float64    `json:"bat"`
-	Active       bool       `json:"active"`
-	TimeStamp    time.Time  `json:"stamp"`
-	GpsPosition  [2]float64 `json:"gps"`
+	Address      int       `json:"address"`
+	ID           string    `json:"id"`
+	LastRssi     int       `json:"rssi"`
+	Frequency    float64   `json:"freq"`
+	Mode         int       `json:"mode"`
+	Temperature  float64   `json:"temp"`
+	BatteryLevel float64   `json:"bat"`
+	Active       bool      `json:"active"`
+	TimeStamp    time.Time `json:"stamp"`
+
+	// Location (lat, long)
+	Location [2]float64 `json:"loc"`
+}
+
+// HasLocation returns true, if long/lat values are not zero
+func (n *Node) HasLocation() bool {
+	return n.Location[0] != 0 && n.Location[1] != 0
 }
 
 // Command realizes a simple RPC interface
@@ -102,7 +108,7 @@ type CommandTransfer struct {
 	ticker      *time.Ticker
 }
 
-// NewCommandTransfer creates a new instance and sets up a periodic retransmit
+// NewCommandTransfer creates a new instance
 func NewCommandTransfer(
 	command *Command,
 	output chan<- []byte,
