@@ -32,9 +32,23 @@ func (structType StructType) String() string {
 	return "Unknown"
 }
 
-// TypeHelper is a small helper struct used to unmarshal json messages to extract their type
-type TypeHelper struct {
-	Type StructType `json:"type"`
+const (
+	// SmartBulb3000Type type identifier
+	SmartBulb3000Type string = "smart_bulb_3000"
+)
+
+// MinimalNode is a helper struct to represent the minimum information we require from a generic lora node.
+// Used to unmarshal json messages to extract their type
+type MinimalNode struct {
+	Type     string `json:"type"`
+	Address  uint8  `json:"address"`
+	LastRssi int    `json:"rssi"`
+}
+
+// NodeEvent groups a message from a generic node with its timestamp
+type NodeEvent struct {
+	Data      interface{} `json:"data"`
+	TimeStamp time.Time   `json:"stamp"`
 }
 
 // Node structures information of a remote device

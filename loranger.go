@@ -1,10 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -41,8 +42,11 @@ var commandMaxNumTransmit = 10
 // slice of connected serials
 var serialDevices []*serial.Port
 
+// tcp-connections
+var tcpConnections []net.Conn
+
 // serial IO channels
-var serialInput, serialOutput chan []byte
+var dataInput, dataOutput chan []byte
 
 // nodes
 var nodeMap map[int][]nodes.Node
@@ -88,74 +92,86 @@ func readData(input chan []byte) {
 	for line := range input {
 		// log.Println(string(line))
 
-		var typeHelper nodes.TypeHelper
+		var typeHelper nodes.MinimalNode
 		if err := json.Unmarshal(line, &typeHelper); err != nil {
 			log.Println("invalid json", string(line))
 		} else {
+
+			log.Println(string(line))
+
 			switch typeHelper.Type {
-			case nodes.NodeType:
-				var node nodes.Node
-				if err := json.Unmarshal(line, &node); err != nil {
-					log.Println("invalid json:", string(line))
-				} else {
-					var lastNode *nodes.Node
+			case nodes.SmartBulb3000Type:
+				var foo interface{}
 
-					if len(nodeMap[node.Address]) > 0 {
-						lastNode = &nodeMap[node.Address][len(nodeMap[node.Address])-1]
-					}
-
-					// no ID contained, keep the last one
-					if node.ID == "" && lastNode != nil {
-						node.ID = lastNode.ID
-					}
-					// no location contained, keep last one
-					if !node.HasLocation() && lastNode != nil {
-						node.Location = lastNode.Location
-					}
-					node.Active = true
-					node.TimeStamp = time.Now()
-					nodeMap[node.Address] = append(nodeMap[node.Address], node)
-
-					// emit SSE-event
-					sseServer.NodeEvent <- &node
-
-					// existing timer?
-					if timer, hasTimer := nodeTimers[node.Address]; hasTimer {
-						timer.Stop()
-					}
-
-					// create deadline Timer for inactivity status
-					nodeTimers[node.Address] = time.AfterFunc(nodeTimeout, func() {
-
-						// copy last state and set inactive
-						newState := nodeMap[node.Address][len(nodeMap[node.Address])-1]
-						newState.Active = false
-						nodeMap[node.Address] = append(nodeMap[node.Address], newState)
-
-						// emit SSE-event
-						sseServer.NodeEvent <- &newState
-					})
+				if err := json.Unmarshal(line, &foo); err == nil {
+					// log.Println(foo)
 				}
-			case nodes.CommandACKType:
-				var commandACK nodes.CommandACK
-				if err := json.Unmarshal(line, &commandACK); err != nil {
-					log.Println("invalid json:", string(line))
-				} else {
-					if commandACK.Ok {
-						pendingCommandLock.RLock()
-						// log.Println("received ACK for command:", commands[CommandACK.CommandID])
-						if cmd, ok := commandTransfers[commandACK.CommandID]; ok {
-							cmd.Done <- true
-							commandsDone <- cmd
-						}
-						pendingCommandLock.RUnlock()
-					}
-					// emit SSE-event
-					sseServer.CommandEvent <- commandList()
-				}
-			default:
-				log.Println("unknown data format", string(line))
 			}
+
+			// switch typeHelper.Type {
+			// case nodes.NodeType:
+			// 	var node nodes.Node
+			// 	if err := json.Unmarshal(line, &node); err != nil {
+			// 		log.Println("invalid json:", string(line))
+			// 	} else {
+			// 		var lastNode *nodes.Node
+			//
+			// 		if len(nodeMap[node.Address]) > 0 {
+			// 			lastNode = &nodeMap[node.Address][len(nodeMap[node.Address])-1]
+			// 		}
+			//
+			// 		// no ID contained, keep the last one
+			// 		if node.ID == "" && lastNode != nil {
+			// 			node.ID = lastNode.ID
+			// 		}
+			// 		// no location contained, keep last one
+			// 		if !node.HasLocation() && lastNode != nil {
+			// 			node.Location = lastNode.Location
+			// 		}
+			// 		node.Active = true
+			// 		node.TimeStamp = time.Now()
+			// 		nodeMap[node.Address] = append(nodeMap[node.Address], node)
+			//
+			// 		// emit SSE-event
+			// 		sseServer.NodeEvent <- &node
+			//
+			// 		// existing timer?
+			// 		if timer, hasTimer := nodeTimers[node.Address]; hasTimer {
+			// 			timer.Stop()
+			// 		}
+			//
+			// 		// create deadline Timer for inactivity status
+			// 		nodeTimers[node.Address] = time.AfterFunc(nodeTimeout, func() {
+			//
+			// 			// copy last state and set inactive
+			// 			newState := nodeMap[node.Address][len(nodeMap[node.Address])-1]
+			// 			newState.Active = false
+			// 			nodeMap[node.Address] = append(nodeMap[node.Address], newState)
+			//
+			// 			// emit SSE-event
+			// 			sseServer.NodeEvent <- &newState
+			// 		})
+			// 	}
+			// case nodes.CommandACKType:
+			// 	var commandACK nodes.CommandACK
+			// 	if err := json.Unmarshal(line, &commandACK); err != nil {
+			// 		log.Println("invalid json:", string(line))
+			// 	} else {
+			// 		if commandACK.Ok {
+			// 			pendingCommandLock.RLock()
+			// 			// log.Println("received ACK for command:", commands[CommandACK.CommandID])
+			// 			if cmd, ok := commandTransfers[commandACK.CommandID]; ok {
+			// 				cmd.Done <- true
+			// 				commandsDone <- cmd
+			// 			}
+			// 			pendingCommandLock.RUnlock()
+			// 		}
+			// 		// emit SSE-event
+			// 		sseServer.CommandEvent <- commandList()
+			// 	}
+			// default:
+			// 	log.Println("unknown data format", string(line))
+			// }
 		}
 	}
 }
@@ -264,7 +280,7 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(ack)
 
 	if hasNode {
-		newCmdTransfer := nodes.NewCommandTransfer(command, serialOutput, commandMaxNumTransmit,
+		newCmdTransfer := nodes.NewCommandTransfer(command, dataOutput, commandMaxNumTransmit,
 			commandTimeout)
 
 		// lock mutex and keep track of the command
@@ -319,11 +335,37 @@ func readSerial(s *serial.Port, output chan<- []byte) {
 	}
 }
 
+func readTCP(url string, port uint16, output chan<- []byte) {
+	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", url, port))
+
+	if err != nil {
+		return
+	}
+
+	tcpConnections = append(tcpConnections, conn)
+	reader := bufio.NewReader(conn)
+
+	for {
+		bytes, err := reader.ReadBytes('\n')
+
+		if err != nil {
+			log.Fatal(err)
+			continue
+		}
+
+		output <- bytes
+	}
+}
+
 func writeData(input <-chan []byte) {
 	for bytes := range input {
 		for _, s := range serialDevices {
 			s.Write(bytes)
 			s.Flush()
+		}
+
+		for _, con := range tcpConnections {
+			con.Write(bytes)
 		}
 	}
 }
@@ -350,48 +392,53 @@ func main() {
 	commandLog = []nodes.CommandLogItem{}
 
 	// create serial IO-channels
-	serialInput = make(chan []byte)
-	serialOutput = make(chan []byte)
+	dataInput = make(chan []byte)
+	dataOutput = make(chan []byte)
 
 	// create command channels
 	commandQueue = make(chan *nodes.CommandTransfer, 100)
 	commandsDone = make(chan *nodes.CommandTransfer, 100)
 
-	files, err := ioutil.ReadDir("/dev")
-	if err != nil {
-		log.Fatal(err)
-	}
+	// // init serial input
+	// files, err := ioutil.ReadDir("/dev")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	//
+	// for _, f := range files {
+	// 	deviceName := "/dev/" + f.Name()
+	//
+	// 	if strings.Contains(deviceName, "ttyACM") || strings.Contains(deviceName, "tty.usb") {
+	// 		c := &serial.Config{Name: deviceName, Baud: 115200}
+	// 		s, err := serial.OpenPort(c)
+	// 		if err != nil {
+	// 			log.Fatal(err)
+	// 			continue
+	// 		}
+	// 		defer s.Close()
+	// 		serialDevices = append(serialDevices, s)
+	//
+	// 		log.Println("reading from", deviceName)
+	//
+	// 		// workaround for fishy behaviour: send initial newline char
+	// 		s.Write([]byte("\n"))
+	//
+	// 		// producer feeds lines into channel
+	// 		go readSerial(s, dataInput)
+	//
+	// 		// quit after first found serial
+	// 		break
+	// 	}
+	// }
 
-	for _, f := range files {
-		deviceName := "/dev/" + f.Name()
+	// read from tcp-connection
+	go readTCP("loranger.local", 4444, dataInput)
 
-		if strings.Contains(deviceName, "ttyACM") || strings.Contains(deviceName, "tty.usb") {
-			c := &serial.Config{Name: deviceName, Baud: 115200}
-			s, err := serial.OpenPort(c)
-			if err != nil {
-				log.Fatal(err)
-				continue
-			}
-			defer s.Close()
-			serialDevices = append(serialDevices, s)
-
-			log.Println("reading from", deviceName)
-
-			// workaround for fishy behaviour: send initial newline char
-			s.Write([]byte("\n"))
-
-			// producer feeds lines into channel
-			go readSerial(s, serialInput)
-
-			// quit after first found serial
-			break
-		}
-	}
 	// process incoming data
-	go readData(serialInput)
+	go readData(dataInput)
 
-	// deliver outgoing data to connected serials
-	go writeData(serialOutput)
+	// deliver outgoing data to connected serials and tcp-connections
+	go writeData(dataOutput)
 
 	// start command processing
 	for i := 0; i < maxNumConcurrantCommands; i++ {
