@@ -41,35 +41,15 @@ const (
 // Used to unmarshal json messages to extract their type
 type MinimalNode struct {
 	Type     string `json:"type"`
-	Address  uint8  `json:"address"`
+	Address  int    `json:"address"`
 	LastRssi int    `json:"rssi"`
 }
 
 // NodeEvent groups a message from a generic node with its timestamp
 type NodeEvent struct {
+	Active    bool        `json:"active"`
 	Data      interface{} `json:"data"`
 	TimeStamp time.Time   `json:"stamp"`
-}
-
-// Node structures information of a remote device
-type Node struct {
-	Address      int       `json:"address"`
-	ID           string    `json:"id"`
-	LastRssi     int       `json:"rssi"`
-	Frequency    float64   `json:"freq"`
-	Mode         int       `json:"mode"`
-	Temperature  float64   `json:"temp"`
-	BatteryLevel float64   `json:"bat"`
-	Active       bool      `json:"active"`
-	TimeStamp    time.Time `json:"stamp"`
-
-	// Location (lat, long)
-	Location [2]float64 `json:"loc"`
-}
-
-// HasLocation returns true, if long/lat values are not zero
-func (n *Node) HasLocation() bool {
-	return n.Location[0] != 0 && n.Location[1] != 0
 }
 
 // Command realizes a simple RPC interface
@@ -192,7 +172,7 @@ func transmitWorker(cmd *CommandTransfer) {
 }
 
 // FilterNodes filters a slice of Nodes according to the provided duration and granularity
-func FilterNodes(nodes []Node, duration, granularity time.Duration) (outNodes []Node) {
+func FilterNodes(nodes []*NodeEvent, duration, granularity time.Duration) (outNodes []*NodeEvent) {
 	durationAccum := granularity
 	lastTimeStamp := nodes[0].TimeStamp
 

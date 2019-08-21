@@ -49,7 +49,7 @@ var tcpConnections []net.Conn
 var dataInput, dataOutput chan []byte
 
 // nodes
-var nodeMap map[int][]nodes.Node
+var nodeMap map[int][]*nodes.NodeEvent
 
 // deadline timers for active Nodes
 var nodeTimers map[int]*time.Timer
@@ -92,86 +92,65 @@ func readData(input chan []byte) {
 	for line := range input {
 		// log.Println(string(line))
 
-		var typeHelper nodes.MinimalNode
-		if err := json.Unmarshal(line, &typeHelper); err != nil {
-			log.Println("invalid json", string(line))
-		} else {
+		// possible types we just received
+		var minimalNode nodes.MinimalNode
+		var commandACK nodes.CommandACK
 
-			log.Println(string(line))
+		if err := json.Unmarshal(line, &minimalNode); err == nil {
+			address := minimalNode.Address
 
-			switch typeHelper.Type {
-			case nodes.SmartBulb3000Type:
-				var foo interface{}
+			var node interface{}
 
-				if err := json.Unmarshal(line, &foo); err == nil {
-					// log.Println(foo)
+			if err := json.Unmarshal(line, &node); err == nil {
+				log.Println("node:", node)
+
+				var lastNodeEvent *nodes.NodeEvent
+
+				if len(nodeMap[address]) > 0 {
+					lastNodeEvent = nodeMap[address][len(nodeMap[address])-1]
+				} else {
+					lastNodeEvent = &nodes.NodeEvent{}
 				}
-			}
 
-			// switch typeHelper.Type {
-			// case nodes.NodeType:
-			// 	var node nodes.Node
-			// 	if err := json.Unmarshal(line, &node); err != nil {
-			// 		log.Println("invalid json:", string(line))
-			// 	} else {
-			// 		var lastNode *nodes.Node
-			//
-			// 		if len(nodeMap[node.Address]) > 0 {
-			// 			lastNode = &nodeMap[node.Address][len(nodeMap[node.Address])-1]
-			// 		}
-			//
-			// 		// no ID contained, keep the last one
-			// 		if node.ID == "" && lastNode != nil {
-			// 			node.ID = lastNode.ID
-			// 		}
-			// 		// no location contained, keep last one
-			// 		if !node.HasLocation() && lastNode != nil {
-			// 			node.Location = lastNode.Location
-			// 		}
-			// 		node.Active = true
-			// 		node.TimeStamp = time.Now()
-			// 		nodeMap[node.Address] = append(nodeMap[node.Address], node)
-			//
-			// 		// emit SSE-event
-			// 		sseServer.NodeEvent <- &node
-			//
-			// 		// existing timer?
-			// 		if timer, hasTimer := nodeTimers[node.Address]; hasTimer {
-			// 			timer.Stop()
-			// 		}
-			//
-			// 		// create deadline Timer for inactivity status
-			// 		nodeTimers[node.Address] = time.AfterFunc(nodeTimeout, func() {
-			//
-			// 			// copy last state and set inactive
-			// 			newState := nodeMap[node.Address][len(nodeMap[node.Address])-1]
-			// 			newState.Active = false
-			// 			nodeMap[node.Address] = append(nodeMap[node.Address], newState)
-			//
-			// 			// emit SSE-event
-			// 			sseServer.NodeEvent <- &newState
-			// 		})
-			// 	}
-			// case nodes.CommandACKType:
-			// 	var commandACK nodes.CommandACK
-			// 	if err := json.Unmarshal(line, &commandACK); err != nil {
-			// 		log.Println("invalid json:", string(line))
-			// 	} else {
-			// 		if commandACK.Ok {
-			// 			pendingCommandLock.RLock()
-			// 			// log.Println("received ACK for command:", commands[CommandACK.CommandID])
-			// 			if cmd, ok := commandTransfers[commandACK.CommandID]; ok {
-			// 				cmd.Done <- true
-			// 				commandsDone <- cmd
-			// 			}
-			// 			pendingCommandLock.RUnlock()
-			// 		}
-			// 		// emit SSE-event
-			// 		sseServer.CommandEvent <- commandList()
-			// 	}
-			// default:
-			// 	log.Println("unknown data format", string(line))
-			// }
+				lastNodeEvent.Active = true
+				lastNodeEvent.Data = node
+				lastNodeEvent.TimeStamp = time.Now()
+				nodeMap[address] = append(nodeMap[address], lastNodeEvent)
+
+				// emit SSE-event
+				sseServer.NodeEvent <- &node
+
+				// existing timer?
+				if timer, hasTimer := nodeTimers[address]; hasTimer {
+					timer.Stop()
+				}
+
+				// create deadline Timer for inactivity status
+				nodeTimers[address] = time.AfterFunc(nodeTimeout, func() {
+
+					// copy last state and set inactive
+					newState := nodeMap[address][len(nodeMap[address])-1]
+					newState.Active = false
+					nodeMap[address] = append(nodeMap[address], newState)
+
+					// emit SSE-event
+					sseServer.NodeEvent <- &newState.Data
+				})
+			}
+		} else if err := json.Unmarshal(line, &commandACK); err == nil {
+			if commandACK.Ok {
+				pendingCommandLock.RLock()
+				// log.Println("received ACK for command:", commands[CommandACK.CommandID])
+				if cmd, ok := commandTransfers[commandACK.CommandID]; ok {
+					cmd.Done <- true
+					commandsDone <- cmd
+				}
+				pendingCommandLock.RUnlock()
+			}
+			// emit SSE-event
+			sseServer.CommandEvent <- commandList()
+		} else {
+			log.Println("unknown data format", string(line))
 		}
 	}
 }
@@ -246,7 +225,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 			nodeKeys = append(nodeKeys, k)
 		}
 		sort.Ints(nodeKeys)
-		nodeList := make([]nodes.Node, len(nodeMap))
+		nodeList := make([]*nodes.NodeEvent, len(nodeMap))
 
 		for i, k := range nodeKeys {
 			nodeList[i] = nodeMap[k][len(nodeMap[k])-1]
@@ -386,7 +365,7 @@ func main() {
 	}
 
 	// make our global state maps
-	nodeMap = make(map[int][]nodes.Node)
+	nodeMap = make(map[int][]*nodes.NodeEvent)
 	nodeTimers = make(map[int]*time.Timer)
 	commandTransfers = make(map[int]*nodes.CommandTransfer)
 	commandLog = []nodes.CommandLogItem{}
