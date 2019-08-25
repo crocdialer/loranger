@@ -172,13 +172,14 @@ func transmitWorker(cmd *CommandTransfer) {
 }
 
 // FilterNodes filters a slice of Nodes according to the provided duration and granularity
-func FilterNodes(nodes []*NodeEvent, duration, granularity time.Duration) (outNodes []*NodeEvent) {
+func FilterNodes(nodes []NodeEvent, duration, granularity time.Duration) (outNodes []NodeEvent) {
 	durationAccum := granularity
 	lastTimeStamp := nodes[0].TimeStamp
 
 	for _, logItem := range nodes {
 
 		if time.Now().Sub(logItem.TimeStamp) < duration {
+
 			// accum durations, drop too fine-grained values
 			durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)
 
@@ -189,5 +190,6 @@ func FilterNodes(nodes []*NodeEvent, duration, granularity time.Duration) (outNo
 		}
 		lastTimeStamp = logItem.TimeStamp
 	}
+	// log.Printf("outNodes (%d): %v\n", len(outNodes), outNodes)
 	return outNodes
 }

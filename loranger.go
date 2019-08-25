@@ -49,7 +49,7 @@ var tcpConnections []net.Conn
 var dataInput, dataOutput chan []byte
 
 // nodes
-var nodeMap map[int][]*nodes.NodeEvent
+var nodeMap map[int][]nodes.NodeEvent
 
 // deadline timers for active Nodes
 var nodeTimers map[int]*time.Timer
@@ -102,14 +102,14 @@ func readData(input chan []byte) {
 			var node interface{}
 
 			if err := json.Unmarshal(line, &node); err == nil {
-				log.Println("node:", node)
+				// log.Println("node:", node)
 
-				var lastNodeEvent *nodes.NodeEvent
+				var lastNodeEvent nodes.NodeEvent
 
 				if len(nodeMap[address]) > 0 {
 					lastNodeEvent = nodeMap[address][len(nodeMap[address])-1]
 				} else {
-					lastNodeEvent = &nodes.NodeEvent{}
+					lastNodeEvent = nodes.NodeEvent{}
 				}
 
 				lastNodeEvent.Active = true
@@ -118,7 +118,7 @@ func readData(input chan []byte) {
 				nodeMap[address] = append(nodeMap[address], lastNodeEvent)
 
 				// emit SSE-event
-				sseServer.NodeEvent <- &node
+				sseServer.NodeEvent <- lastNodeEvent
 
 				// existing timer?
 				if timer, hasTimer := nodeTimers[address]; hasTimer {
@@ -134,7 +134,7 @@ func readData(input chan []byte) {
 					nodeMap[address] = append(nodeMap[address], newState)
 
 					// emit SSE-event
-					sseServer.NodeEvent <- &newState.Data
+					sseServer.NodeEvent <- newState
 				})
 			}
 		} else if err := json.Unmarshal(line, &commandACK); err == nil {
@@ -225,7 +225,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 			nodeKeys = append(nodeKeys, k)
 		}
 		sort.Ints(nodeKeys)
-		nodeList := make([]*nodes.NodeEvent, len(nodeMap))
+		nodeList := make([]nodes.NodeEvent, len(nodeMap))
 
 		for i, k := range nodeKeys {
 			nodeList[i] = nodeMap[k][len(nodeMap[k])-1]
@@ -318,6 +318,7 @@ func readTCP(url string, port uint16, output chan<- []byte) {
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", url, port))
 
 	if err != nil {
+		log.Printf("could not connect to %s:%d\n", url, port)
 		return
 	}
 
@@ -365,7 +366,7 @@ func main() {
 	}
 
 	// make our global state maps
-	nodeMap = make(map[int][]*nodes.NodeEvent)
+	nodeMap = make(map[int][]nodes.NodeEvent)
 	nodeTimers = make(map[int]*time.Timer)
 	commandTransfers = make(map[int]*nodes.CommandTransfer)
 	commandLog = []nodes.CommandLogItem{}

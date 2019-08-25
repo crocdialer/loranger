@@ -12,7 +12,7 @@ import (
 // listens for incoming events on its NodeEvent and CommandEvent channels
 // and broadcasts event data to all registered connections
 type Server struct {
-	NodeEvent chan *interface{}
+	NodeEvent chan nodes.NodeEvent
 
 	CommandEvent chan []*nodes.CommandTransfer
 
@@ -33,7 +33,7 @@ type Server struct {
 func NewServer() (server *Server) {
 	// Instantiate a server
 	server = &Server{
-		NodeEvent:      make(chan *interface{}, 100),
+		NodeEvent:      make(chan nodes.NodeEvent, 100),
 		CommandEvent:   make(chan []*nodes.CommandTransfer, 100),
 		notifier:       make(chan []byte, 100),
 		newClients:     make(chan chan []byte),
