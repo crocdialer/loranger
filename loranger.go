@@ -3,11 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +26,12 @@ var port = 8080
 
 // static serve directory
 var serveFilesPath = "./public"
+
+// loranger_gateway URL
+var gatewayURL = "localhost"
+
+// loranger_gateway port
+var gatewayPort = 4444
 
 // inactivity timeout for Nodes
 var nodeTimeout = time.Second * 10
@@ -314,7 +320,7 @@ func readSerial(s *serial.Port, output chan<- []byte) {
 	}
 }
 
-func readTCP(url string, port uint16, output chan<- []byte) {
+func readTCP(url string, port int, output chan<- []byte) {
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", url, port))
 
 	if err != nil {
@@ -353,17 +359,20 @@ func writeData(input <-chan []byte) {
 func main() {
 	log.Println("welcome loranger")
 
-	// get serve path
-	if len(os.Args) > 1 {
-		serveFilesPath = os.Args[1]
-	}
+	// http-server path
+	flag.StringVar(&serveFilesPath, "http_dir", serveFilesPath, "http-server path")
 
-	// get server port
-	if len(os.Args) > 2 {
-		if p, err := strconv.Atoi(os.Args[2]); err == nil {
-			port = p
-		}
-	}
+	// http-server port
+	flag.IntVar(&port, "http_port", port, "http-server port")
+
+	// loranger-gateway url
+	flag.StringVar(&gatewayURL, "gateway", gatewayURL, "loranger-gateway URL")
+
+	// http-server port
+	flag.IntVar(&gatewayPort, "gateway_port", gatewayPort, "loranger-gateway port")
+
+	// parse commandline flags
+	flag.Parse()
 
 	// make our global state maps
 	nodeMap = make(map[int][]nodes.NodeEvent)
@@ -412,7 +421,7 @@ func main() {
 	// }
 
 	// read from tcp-connection
-	go readTCP("loranger.local", 4444, dataInput)
+	go readTCP(gatewayURL, gatewayPort, dataInput)
 
 	// process incoming data
 	go readData(dataInput)
