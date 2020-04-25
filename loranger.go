@@ -228,7 +228,10 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 		var nodeKeys []int
 
 		for k := range nodeMap {
-			nodeKeys = append(nodeKeys, k)
+			//tmp
+			if len(nodeMap[k]) > 1 {
+				nodeKeys = append(nodeKeys, k)
+			}
 		}
 		sort.Ints(nodeKeys)
 		nodeList := make([]nodes.NodeEvent, len(nodeMap))
