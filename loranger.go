@@ -57,8 +57,14 @@ var dataInput, dataOutput chan []byte
 // nodes
 var nodeMap map[int][]nodes.NodeEvent
 
+// mutex for nodes
+var nodeMutex = sync.RWMutex{}
+
 // deadline timers for active Nodes
 var nodeTimers map[int]*time.Timer
+
+// interval to perform a node-cleanup
+var cleanupInterval = time.Second * 20
 
 // next command id
 var nextCommandID int32 = 1
@@ -72,6 +78,7 @@ var commandQueue, commandsDone chan *nodes.CommandTransfer
 // keep track of issued commands
 var commandLog []nodes.CommandLogItem
 
+// mutex for pending commands
 var pendingCommandLock = sync.RWMutex{}
 
 // handle for SSE-Server
@@ -121,7 +128,10 @@ func readData(input chan []byte) {
 				lastNodeEvent.Active = true
 				lastNodeEvent.Data = node
 				lastNodeEvent.TimeStamp = time.Now()
+
+				nodeMutex.Lock()
 				nodeMap[address] = append(nodeMap[address], lastNodeEvent)
+				nodeMutex.Unlock()
 
 				// emit SSE-event
 				sseServer.NodeEvent <- lastNodeEvent
@@ -161,6 +171,25 @@ func readData(input chan []byte) {
 	}
 }
 
+func cleanupNodes() {
+	for range time.Tick(cleanupInterval) {
+		// log.Println("cleanup!", now)
+		nodeMutex.Lock()
+
+		// cleanup
+		for address, nodeEvents := range nodeMap {
+
+			// TODO: provide cascading time granularity
+
+			// remove spurious readings
+			if len(nodeEvents) < 3 {
+				delete(nodeMap, address)
+			}
+		}
+		nodeMutex.Unlock()
+	}
+}
+
 func commandQueueWorker(commands <-chan *nodes.CommandTransfer, results chan<- *nodes.CommandTransfer) {
 	for cmdTransfer := range commands {
 		cmdTransfer.Start(results, func() {
@@ -195,6 +224,10 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 	// all nodes or a specific one
 	vars := mux.Vars(r)
 	nodeID, ok := vars["nodeID"]
+
+	// lock nodeMap read-only, defer unlock
+	nodeMutex.RLock()
+	defer nodeMutex.RUnlock()
 
 	if ok {
 		k, _ := strconv.Atoi(nodeID)
@@ -437,6 +470,9 @@ func main() {
 		go commandQueueWorker(commandQueue, commandsDone)
 	}
 	go commandQueueCollector()
+
+	// start regular node-cleanup
+	go cleanupNodes()
 
 	// serve static files
 	fs := http.FileServer(http.Dir(serveFilesPath))
