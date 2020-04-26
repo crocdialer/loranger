@@ -171,14 +171,34 @@ func transmitWorker(cmd *CommandTransfer) {
 	}
 }
 
+// GranularityFn maps a timestap to a time-granularity
+type GranularityFn = func(time.Duration) time.Duration
+
+// TimeCascade returns increasing time-granularities for older time-stamps.
+func TimeCascade(age time.Duration) time.Duration {
+	if age > time.Hour*24 {
+		return time.Hour
+	} else if age > time.Hour {
+		return time.Minute
+	}
+	return 0
+}
+
 // FilterNodes filters a slice of Nodes according to the provided duration and granularity
-func FilterNodes(nodes []NodeEvent, duration, granularity time.Duration) (outNodes []NodeEvent) {
+func FilterNodes(nodes []NodeEvent, duration, granularity time.Duration, granularityFn GranularityFn) (outNodes []NodeEvent) {
 	durationAccum := granularity
 	lastTimeStamp := nodes[0].TimeStamp
 
 	for _, logItem := range nodes {
 
-		if time.Now().Sub(logItem.TimeStamp) < duration {
+		itemAge := time.Now().Sub(logItem.TimeStamp)
+
+		if duration > 0 && itemAge < duration {
+
+			// optional lookup of granularity
+			if granularityFn != nil {
+				granularity = granularityFn(itemAge)
+			}
 
 			// accum durations, drop too fine-grained values
 			durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)

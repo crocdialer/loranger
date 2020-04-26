@@ -179,7 +179,8 @@ func cleanupNodes() {
 		// cleanup
 		for address, nodeEvents := range nodeMap {
 
-			// TODO: provide cascading time granularity
+			// provide cascading time granularity
+			nodeMap[address] = nodes.FilterNodes(nodeMap[address], 0, 0, nodes.TimeCascade)
 
 			// remove spurious readings
 			if len(nodeEvents) < 3 {
@@ -250,7 +251,7 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Println("log of last:", duration, "granularity:", granularity)
 
-				nodeOutLog := nodes.FilterNodes(nodeHistory, duration, granularity)
+				nodeOutLog := nodes.FilterNodes(nodeHistory, duration, granularity, nil)
 				enc.Encode(nodeOutLog)
 			} else {
 				enc.Encode(nodeHistory[len(nodeHistory)-1])
