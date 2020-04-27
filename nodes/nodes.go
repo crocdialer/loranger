@@ -193,21 +193,23 @@ func FilterNodes(nodes []NodeEvent, duration, granularity time.Duration, granula
 
 		itemAge := time.Now().Sub(logItem.TimeStamp)
 
-		if duration > 0 && itemAge < duration {
-
-			// optional lookup of granularity
-			if granularityFn != nil {
-				granularity = granularityFn(itemAge)
-			}
-
-			// accum durations, drop too fine-grained values
-			durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)
-
-			if durationAccum >= granularity {
-				durationAccum = 0
-				outNodes = append(outNodes, logItem)
-			}
+		if duration > 0 && itemAge > duration {
+			continue
 		}
+
+		// optional lookup of granularity
+		if granularityFn != nil {
+			granularity = granularityFn(itemAge)
+		}
+
+		// accum durations, drop too fine-grained values
+		durationAccum += logItem.TimeStamp.Sub(lastTimeStamp)
+
+		if durationAccum >= granularity {
+			durationAccum = 0
+			outNodes = append(outNodes, logItem)
+		}
+
 		lastTimeStamp = logItem.TimeStamp
 	}
 	// log.Printf("outNodes (%d): %v\n", len(outNodes), outNodes)
