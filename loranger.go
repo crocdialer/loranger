@@ -119,6 +119,8 @@ func readData(input chan []byte) {
 
 				var lastNodeEvent nodes.NodeEvent
 
+				nodeMutex.Lock()
+
 				if len(nodeMap[address]) > 0 {
 					lastNodeEvent = nodeMap[address][len(nodeMap[address])-1]
 				} else {
@@ -129,12 +131,12 @@ func readData(input chan []byte) {
 				lastNodeEvent.Data = node
 				lastNodeEvent.TimeStamp = time.Now()
 
-				nodeMutex.Lock()
 				nodeMap[address] = append(nodeMap[address], lastNodeEvent)
-				nodeMutex.Unlock()
 
 				// emit SSE-event
 				sseServer.NodeEvent <- lastNodeEvent
+
+        nodeMutex.Unlock()
 
 				// existing timer?
 				if timer, hasTimer := nodeTimers[address]; hasTimer {
@@ -143,14 +145,18 @@ func readData(input chan []byte) {
 
 				// create deadline Timer for inactivity status
 				nodeTimers[address] = time.AfterFunc(nodeTimeout, func() {
+				  nodeMutex.Lock()
 
 					// copy last state and set inactive
 					newState := nodeMap[address][len(nodeMap[address])-1]
 					newState.Active = false
+
 					nodeMap[address] = append(nodeMap[address], newState)
 
 					// emit SSE-event
 					sseServer.NodeEvent <- newState
+
+          nodeMutex.Unlock()
 				})
 			}
 		} else if err := json.Unmarshal(line, &commandACK); err == nil {
@@ -180,7 +186,7 @@ func cleanupNodes() {
 		for address, nodeEvents := range nodeMap {
 
 			// provide cascading time granularity
-			nodeMap[address] = nodes.FilterNodes(nodeMap[address], 0, 0, nodes.TimeCascade)
+			//nodeMap[address] = nodes.FilterNodes(nodeMap[address], 0, 0, nodes.TimeCascade)
 
 			// remove spurious readings
 			if len(nodeEvents) < 3 {
