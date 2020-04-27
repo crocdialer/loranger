@@ -147,14 +147,19 @@ func readData(input chan []byte) {
 				nodeTimers[address] = time.AfterFunc(nodeTimeout, func() {
 					nodeMutex.Lock()
 
+					numStates := len(nodeMap[address])
+
 					// copy last state and set inactive
-					newState := nodeMap[address][len(nodeMap[address])-1]
-					newState.Active = false
+					if numStates > 1 {
 
-					nodeMap[address] = append(nodeMap[address], newState)
+						newState := nodeMap[address][numStates-1]
+						newState.Active = false
 
-					// emit SSE-event
-					sseServer.NodeEvent <- newState
+						nodeMap[address] = append(nodeMap[address], newState)
+
+						// emit SSE-event
+						sseServer.NodeEvent <- newState
+					}
 
 					nodeMutex.Unlock()
 				})
@@ -186,11 +191,13 @@ func cleanupNodes() {
 		for address, nodeEvents := range nodeMap {
 
 			// provide cascading time granularity
-			nodeMap[address] = nodes.FilterNodes(nodeMap[address], 0, 0, nodes.TimeCascade)
+			nodeEvents = nodes.FilterNodes(nodeEvents, 0, 0, nodes.TimeCascade)
 
 			// remove spurious readings
 			if len(nodeEvents) < 3 {
 				delete(nodeMap, address)
+			} else {
+				nodeMap[address] = nodeEvents
 			}
 		}
 		nodeMutex.Unlock()
