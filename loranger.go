@@ -136,7 +136,7 @@ func readData(input chan []byte) {
 				// emit SSE-event
 				sseServer.NodeEvent <- lastNodeEvent
 
-        nodeMutex.Unlock()
+				nodeMutex.Unlock()
 
 				// existing timer?
 				if timer, hasTimer := nodeTimers[address]; hasTimer {
@@ -145,7 +145,7 @@ func readData(input chan []byte) {
 
 				// create deadline Timer for inactivity status
 				nodeTimers[address] = time.AfterFunc(nodeTimeout, func() {
-				  nodeMutex.Lock()
+					nodeMutex.Lock()
 
 					// copy last state and set inactive
 					newState := nodeMap[address][len(nodeMap[address])-1]
@@ -156,7 +156,7 @@ func readData(input chan []byte) {
 					// emit SSE-event
 					sseServer.NodeEvent <- newState
 
-          nodeMutex.Unlock()
+					nodeMutex.Unlock()
 				})
 			}
 		} else if err := json.Unmarshal(line, &commandACK); err == nil {
@@ -186,7 +186,7 @@ func cleanupNodes() {
 		for address, nodeEvents := range nodeMap {
 
 			// provide cascading time granularity
-			//nodeMap[address] = nodes.FilterNodes(nodeMap[address], 0, 0, nodes.TimeCascade)
+			nodeMap[address] = nodes.FilterNodes(nodeMap[address], 0, 0, nodes.TimeCascade)
 
 			// remove spurious readings
 			if len(nodeEvents) < 3 {
@@ -300,7 +300,9 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	command.CommandID = int(atomic.AddInt32(&nextCommandID, 1))
 
 	// check if the node exists
+	nodeMutex.RLock()
 	_, hasNode := nodeMap[command.Address]
+	nodeMutex.RUnlock()
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
