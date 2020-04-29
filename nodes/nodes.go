@@ -174,24 +174,38 @@ func transmitWorker(cmd *CommandTransfer) {
 // GranularityFn maps a timestap to a time-granularity
 type GranularityFn = func(time.Duration) time.Duration
 
+const (
+	day  time.Duration = 24 * time.Hour
+	week time.Duration = 7 * day
+)
+
 // TimeCascade returns increasing time-granularities for older time-stamps.
 func TimeCascade(age time.Duration) time.Duration {
-	if age > time.Hour*24 {
+	if age > week {
+		return day
+	} else if age > day {
 		return time.Hour
 	} else if age > time.Hour {
 		return time.Minute
 	}
-	return 0
+	return time.Second
 }
 
 // FilterNodes filters a slice of Nodes according to the provided duration and granularity
 func FilterNodes(nodes []NodeEvent, duration, granularity time.Duration, granularityFn GranularityFn) (outNodes []NodeEvent) {
-	durationAccum := granularity
+
+	// nothing to filter
+	if len(nodes) == 0 {
+		return outNodes
+	}
 	lastTimeStamp := nodes[0].TimeStamp
+
+	durationAccum := day
+	now := time.Now()
 
 	for _, logItem := range nodes {
 
-		itemAge := time.Now().Sub(logItem.TimeStamp)
+		itemAge := now.Sub(logItem.TimeStamp)
 
 		if duration > 0 && itemAge > duration {
 			continue
