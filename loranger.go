@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -370,25 +371,33 @@ func readSerial(s *serial.Port, output chan<- []byte) {
 }
 
 func readTCP(url string, port int, output chan<- []byte) {
-	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", url, port))
-
-	if err != nil {
-		log.Printf("could not connect to %s:%d\n", url, port)
-		return
-	}
-
-	tcpConnections = append(tcpConnections, conn)
-	reader := bufio.NewReader(conn)
-
 	for {
-		bytes, err := reader.ReadBytes('\n')
+
+		conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", url, port))
 
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("could not connect to %s:%d\n", url, port)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		output <- bytes
+		tcpConnections = append(tcpConnections, conn)
+		reader := bufio.NewReader(conn)
+
+		for {
+			bytes, err := reader.ReadBytes('\n')
+
+			if err != nil {
+				log.Println(err)
+
+				if io.EOF == err {
+					conn.Close()
+					break
+				}
+			}
+
+			output <- bytes
+		}
 	}
 }
 
