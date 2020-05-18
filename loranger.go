@@ -16,8 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/crocdialer/loranger/nodes"
-	"github.com/crocdialer/loranger/sse"
+	"github.com/crocdialer/loranger/modules"
+	"github.com/crocdialer/loranger/modules/nodes"
+	"github.com/crocdialer/loranger/modules/sse"
 	"github.com/gorilla/mux"
 	"github.com/tarm/serial"
 )
@@ -136,6 +137,9 @@ func readData(input chan []byte) {
 
 				// emit SSE-event
 				sseServer.NodeEvent <- lastNodeEvent
+
+				// write to influxdb
+				database.Insert(node)
 
 				nodeMutex.Unlock()
 
