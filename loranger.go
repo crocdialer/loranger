@@ -119,7 +119,7 @@ func readData(input chan []byte) {
 			if err := json.Unmarshal(line, &node); err == nil {
 				// log.Println("node:", node)
 
-				var lastNodeEvent nodes.NodeEvent
+				lastNodeEvent := nodes.NodeEvent{Active: true, Data: node, TimeStamp: time.Now()}
 
 				nodeMutex.Lock()
 
@@ -269,8 +269,57 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Println("log of last:", duration, "granularity:", granularity)
 
-				nodeOutLog := nodes.FilterNodes(nodeHistory, duration, granularity, nil)
-				enc.Encode(nodeOutLog)
+				// create influx-query
+				query := fmt.Sprintf("SELECT median(*) FROM nodes WHERE \"address\" = %d AND time > now() - %s GROUP BY time(%s) fill(none)", k, duration, granularity)
+				// log.Println(query)
+
+				res, err := database.Query(query)
+
+				if err != nil {
+					log.Println(err)
+				}
+
+				// log.Println(res)
+
+				result := res[0]
+				// log.Println(lastResult)
+
+				var outNodes []nodes.NodeEvent
+
+				if len(result.Series) > 0 {
+					var cols []string
+
+					for _, c := range result.Series[0].Columns[1:] {
+						cols = append(cols, strings.Replace(c, "median_", "", -1))
+					}
+
+					for _, value := range result.Series[0].Values {
+
+						data := make(map[string]interface{})
+
+						// parse timestamp
+						timeStamp, err := time.Parse(time.RFC3339, value[0].(string))
+						timeStamp = timeStamp.Local()
+
+						if err != nil {
+							log.Println(err)
+						}
+
+						for i, v := range value[1:] {
+							if v != nil {
+								data[cols[i]] = v
+							}
+						}
+
+						nodeEvent := nodes.NodeEvent{}
+						nodeEvent.Active = true
+						nodeEvent.TimeStamp = timeStamp
+						nodeEvent.Data = data
+
+						outNodes = append(outNodes, nodeEvent)
+					}
+				}
+				enc.Encode(outNodes)
 			} else {
 				enc.Encode(nodeHistory[len(nodeHistory)-1])
 			}
