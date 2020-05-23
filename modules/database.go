@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -17,7 +18,7 @@ const (
 )
 
 // Insert saves points to database
-func Insert(node interface{}) {
+func Insert(timeStamp time.Time, node interface{}) {
 	c, err := client.NewHTTPClient(client.HTTPConfig{
 		Addr: Address,
 	})
@@ -42,7 +43,7 @@ func Insert(node interface{}) {
 		log.Fatal("want type map[string]interface{};  got %T", node)
 	}
 
-	tags := map[string]string{"type": m["type"].(string)}
+	tags := map[string]string{"type": m["type"].(string), "address": fmt.Sprintf("%v", m["address"])}
 
 	fields := make(map[string]interface{})
 
@@ -50,8 +51,9 @@ func Insert(node interface{}) {
 		fields[k] = v
 	}
 	delete(fields, "type")
+	delete(fields, "address")
 
-	pt, err := client.NewPoint("nodes", tags, fields, time.Now())
+	pt, err := client.NewPoint("nodes", tags, fields, timeStamp)
 	if err != nil {
 		log.Fatal(err)
 	}

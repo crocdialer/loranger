@@ -20,6 +20,7 @@ import (
 	"github.com/crocdialer/loranger/modules/nodes"
 	"github.com/crocdialer/loranger/modules/sse"
 	"github.com/gorilla/mux"
+	client "github.com/influxdata/influxdb1-client/v2"
 	"github.com/tarm/serial"
 )
 
@@ -53,20 +54,11 @@ var serialDevices []*serial.Port
 // tcp-connections
 var tcpConnections []net.Conn
 
-// serial IO channels
+// node IO channels
 var dataInput, dataOutput chan []byte
-
-// nodes
-var nodeMap map[int][]nodes.NodeEvent
-
-// mutex for nodes
-var nodeMutex = sync.RWMutex{}
 
 // deadline timers for active Nodes
 var nodeTimers map[int]*time.Timer
-
-// interval to perform a node-cleanup
-var cleanupInterval = time.Second * 20
 
 // next command id
 var nextCommandID int32 = 1
@@ -85,6 +77,9 @@ var pendingCommandLock = sync.RWMutex{}
 
 // handle for SSE-Server
 var sseServer *sse.Server
+
+// channel to write arbitrary node-data to a database
+var nodeStore chan nodes.NodeEvent
 
 func commandList() []*nodes.CommandTransfer {
 	pendingCommandLock.RLock()
@@ -112,62 +107,19 @@ func readData(input chan []byte) {
 		var commandACK nodes.CommandACK
 
 		if err := json.Unmarshal(line, &minimalNode); err == nil {
-			address := minimalNode.Address
 
 			var node interface{}
 
 			if err := json.Unmarshal(line, &node); err == nil {
 				// log.Println("node:", node)
 
-				lastNodeEvent := nodes.NodeEvent{Active: true, Data: node, TimeStamp: time.Now()}
-
-				nodeMutex.Lock()
-
-				if len(nodeMap[address]) > 0 {
-					lastNodeEvent = nodeMap[address][len(nodeMap[address])-1]
-				} else {
-					lastNodeEvent = nodes.NodeEvent{}
-				}
-
-				lastNodeEvent.Active = true
-				lastNodeEvent.Data = node
-				lastNodeEvent.TimeStamp = time.Now()
-
-				nodeMap[address] = append(nodeMap[address], lastNodeEvent)
+				lastNodeEvent := nodes.NodeEvent{Active: true, Data: node, TimeStamp: time.Now().Local()}
 
 				// emit SSE-event
 				sseServer.NodeEvent <- lastNodeEvent
 
-				// write to influxdb
-				database.Insert(node)
-
-				nodeMutex.Unlock()
-
-				// existing timer?
-				if timer, hasTimer := nodeTimers[address]; hasTimer {
-					timer.Stop()
-				}
-
-				// create deadline Timer for inactivity status
-				nodeTimers[address] = time.AfterFunc(nodeTimeout, func() {
-					nodeMutex.Lock()
-
-					numStates := len(nodeMap[address])
-
-					// copy last state and set inactive
-					if numStates > 1 {
-
-						newState := nodeMap[address][numStates-1]
-						newState.Active = false
-
-						nodeMap[address] = append(nodeMap[address], newState)
-
-						// emit SSE-event
-						sseServer.NodeEvent <- newState
-					}
-
-					nodeMutex.Unlock()
-				})
+				// store in database
+				nodeStore <- lastNodeEvent
 			}
 		} else if err := json.Unmarshal(line, &commandACK); err == nil {
 			if commandACK.Ok {
@@ -184,28 +136,6 @@ func readData(input chan []byte) {
 		} else {
 			log.Println("unknown data format", string(line))
 		}
-	}
-}
-
-func cleanupNodes() {
-	for range time.Tick(cleanupInterval) {
-		// log.Println("cleanup!", now)
-		nodeMutex.Lock()
-
-		// cleanup
-		for address, nodeEvents := range nodeMap {
-
-			// provide cascading time granularity
-			nodeEvents = nodes.FilterNodes(nodeEvents, 0, 0, nodes.TimeCascade)
-
-			// remove spurious readings
-			if len(nodeEvents) < 3 {
-				delete(nodeMap, address)
-			} else {
-				nodeMap[address] = nodeEvents
-			}
-		}
-		nodeMutex.Unlock()
 	}
 }
 
@@ -230,6 +160,46 @@ func commandQueueCollector() {
 	}
 }
 
+func nodesFromQueryResult(results []client.Result) (outNodes []nodes.NodeEvent) {
+
+	for _, result := range results {
+		if len(result.Series) > 0 {
+			var cols []string
+
+			for _, c := range result.Series[0].Columns[1:] {
+				cols = append(cols, strings.Replace(c, "median_", "", -1))
+			}
+
+			for _, value := range result.Series[0].Values {
+
+				data := make(map[string]interface{})
+
+				// parse timestamp
+				timeStamp, err := time.Parse(time.RFC3339, value[0].(string))
+				timeStamp = timeStamp.Local()
+
+				if err != nil {
+					log.Println(err)
+				}
+
+				for i, v := range value[1:] {
+					if v != nil {
+						data[cols[i]] = v
+					}
+				}
+
+				nodeEvent := nodes.NodeEvent{}
+				nodeEvent.Active = true
+				nodeEvent.TimeStamp = timeStamp
+				nodeEvent.Data = data
+
+				outNodes = append(outNodes, nodeEvent)
+			}
+		}
+	}
+	return outNodes
+}
+
 // /nodes
 // /nodes/{nodeID:[0-9]+}
 // /nodes/{nodeID:[0-9]+}/log?duration=1h&granularity=10s
@@ -244,13 +214,8 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	nodeID, ok := vars["nodeID"]
 
-	// lock nodeMap read-only, defer unlock
-	nodeMutex.RLock()
-	defer nodeMutex.RUnlock()
-
 	if ok {
 		k, _ := strconv.Atoi(nodeID)
-		nodeHistory, ok := nodeMap[k]
 
 		if ok {
 			// entire history vs. last state
@@ -270,74 +235,78 @@ func handleNodes(w http.ResponseWriter, r *http.Request) {
 				log.Println("log of last:", duration, "granularity:", granularity)
 
 				// create influx-query
-				query := fmt.Sprintf("SELECT median(*) FROM nodes WHERE \"address\" = %d AND time > now() - %s GROUP BY time(%s) fill(none)", k, duration, granularity)
-				// log.Println(query)
-
-				res, err := database.Query(query)
+				query := fmt.Sprintf("SELECT median(*) FROM nodes WHERE \"address\" = '%d' AND time > now() - %s GROUP BY time(%s) fill(none)", k, duration, granularity)
+				results, err := database.Query(query)
 
 				if err != nil {
 					log.Println(err)
 				}
 
-				// log.Println(res)
+				outNodes := nodesFromQueryResult(results)
 
-				result := res[0]
-				// log.Println(lastResult)
-
-				var outNodes []nodes.NodeEvent
-
-				if len(result.Series) > 0 {
-					var cols []string
-
-					for _, c := range result.Series[0].Columns[1:] {
-						cols = append(cols, strings.Replace(c, "median_", "", -1))
-					}
-
-					for _, value := range result.Series[0].Values {
-
-						data := make(map[string]interface{})
-
-						// parse timestamp
-						timeStamp, err := time.Parse(time.RFC3339, value[0].(string))
-						timeStamp = timeStamp.Local()
-
-						if err != nil {
-							log.Println(err)
-						}
-
-						for i, v := range value[1:] {
-							if v != nil {
-								data[cols[i]] = v
-							}
-						}
-
-						nodeEvent := nodes.NodeEvent{}
-						nodeEvent.Active = true
-						nodeEvent.TimeStamp = timeStamp
-						nodeEvent.Data = data
-
-						outNodes = append(outNodes, nodeEvent)
-					}
-				}
 				enc.Encode(outNodes)
 			} else {
-				enc.Encode(nodeHistory[len(nodeHistory)-1])
+
+				// create influx-query
+				duration := 12 * time.Hour
+				maxNumItems := 1
+				query := fmt.Sprintf("SELECT * FROM nodes WHERE \"address\" = '%d' AND time > now() - %s ORDER BY DESC LIMIT %d", k, duration, maxNumItems)
+				results, err := database.Query(query)
+
+				if err == nil {
+					// encode response
+					enc.Encode(nodesFromQueryResult(results))
+				} else {
+					log.Println(err)
+				}
 			}
 		}
 	} else {
-		// no nodeId provided, reply with a sorted list of all nodes' last state
-		var nodeKeys []int
+		// // create influx-query
+		// duration := 12 * time.Hour
+		// maxNumItems := 100
+		// query := fmt.Sprintf("SELECT * FROM nodes WHERE time > now() - %s ORDER BY DESC LIMIT %d", duration, maxNumItems)
+		// results, err := database.Query(query)
+		//
+		// if err == nil {
+		//
+		// 	// create and populate a nodeMap
+		// 	var nodeMap = make(map[int][]nodes.NodeEvent)
+		//
+		// 	for _, nodeEvent := range nodesFromQueryResult(results) {
+		// 		if castedMap, ok := nodeEvent.Data.(map[string]interface{}); ok {
+		//
+		// 			// retrieve address
+		// 			if addStr, ok := castedMap["address"].(string); ok {
+		// 				address, _ := strconv.Atoi(addStr)
+		// 				nodeMap[address] = append(nodeMap[address], nodeEvent)
+		// 			} else {
+		// 				log.Println("address cast failed", castedMap["address"])
+		// 			}
+		// 		} else {
+		// 			log.Println("map cast failed", nodeEvent.Data)
+		// 		}
+		// 	}
+		//
+		// 	// reply with a sorted list of all nodes' last state
+		// 	var nodeKeys []int
+		//
+		// 	for k := range nodeMap {
+		// 		nodeKeys = append(nodeKeys, k)
+		// 	}
+		// 	sort.Ints(nodeKeys)
+		// 	nodeList := make([]nodes.NodeEvent, len(nodeMap))
+		//
+		// 	for i, k := range nodeKeys {
+		// 		nodeList[i] = nodeMap[k][len(nodeMap[k])-1]
+		// 	}
+		// 	enc.Encode(nodeList)
+		//
+		// 	log.Println(nodeList)
+		// } else {
+		// 	log.Println(err)
+		// }
 
-		for k := range nodeMap {
-			nodeKeys = append(nodeKeys, k)
-		}
-		sort.Ints(nodeKeys)
-		nodeList := make([]nodes.NodeEvent, len(nodeMap))
-
-		for i, k := range nodeKeys {
-			nodeList[i] = nodeMap[k][len(nodeMap[k])-1]
-		}
-		enc.Encode(nodeList)
 	}
 }
 
@@ -357,10 +326,12 @@ func handleCommand(w http.ResponseWriter, r *http.Request) {
 	// insert struct-type and CommandID
 	command.CommandID = int(atomic.AddInt32(&nextCommandID, 1))
 
-	// check if the node exists
-	nodeMutex.RLock()
-	_, hasNode := nodeMap[command.Address]
-	nodeMutex.RUnlock()
+	// TODO: check if the node exists
+	hasNode := false
+
+	// nodeMutex.RLock()
+	// _, hasNode := nodeMap[command.Address]
+	// nodeMutex.RUnlock()
 
 	// encode json ACK and send as response
 	enc := json.NewEncoder(w)
@@ -448,7 +419,6 @@ func readTCP(url string, port int, output chan<- []byte) {
 					break
 				}
 			}
-
 			output <- bytes
 		}
 	}
@@ -464,6 +434,12 @@ func writeData(input <-chan []byte) {
 		for _, con := range tcpConnections {
 			con.Write(bytes)
 		}
+	}
+}
+
+func storeNodesInDatabase(input <-chan nodes.NodeEvent) {
+	for nodeEvent := range input {
+		database.Insert(nodeEvent.TimeStamp, nodeEvent.Data)
 	}
 }
 
@@ -486,7 +462,6 @@ func main() {
 	flag.Parse()
 
 	// make our global state maps
-	nodeMap = make(map[int][]nodes.NodeEvent)
 	nodeTimers = make(map[int]*time.Timer)
 	commandTransfers = make(map[int]*nodes.CommandTransfer)
 	commandLog = []nodes.CommandLogItem{}
@@ -499,37 +474,8 @@ func main() {
 	commandQueue = make(chan *nodes.CommandTransfer, 100)
 	commandsDone = make(chan *nodes.CommandTransfer, 100)
 
-	// // init serial input
-	// files, err := ioutil.ReadDir("/dev")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	//
-	// for _, f := range files {
-	// 	deviceName := "/dev/" + f.Name()
-	//
-	// 	if strings.Contains(deviceName, "ttyACM") || strings.Contains(deviceName, "tty.usb") {
-	// 		c := &serial.Config{Name: deviceName, Baud: 115200}
-	// 		s, err := serial.OpenPort(c)
-	// 		if err != nil {
-	// 			log.Fatal(err)
-	// 			continue
-	// 		}
-	// 		defer s.Close()
-	// 		serialDevices = append(serialDevices, s)
-	//
-	// 		log.Println("reading from", deviceName)
-	//
-	// 		// workaround for fishy behaviour: send initial newline char
-	// 		s.Write([]byte("\n"))
-	//
-	// 		// producer feeds lines into channel
-	// 		go readSerial(s, dataInput)
-	//
-	// 		// quit after first found serial
-	// 		break
-	// 	}
-	// }
+	// create a channel to write node-data to a database
+	nodeStore = make(chan nodes.NodeEvent)
 
 	// read from tcp-connection
 	go readTCP(gatewayURL, gatewayPort, dataInput)
@@ -540,14 +486,14 @@ func main() {
 	// deliver outgoing data to connected serials and tcp-connections
 	go writeData(dataOutput)
 
+	// write received data from nodes to a database
+	go storeNodesInDatabase(nodeStore)
+
 	// start command processing
 	for i := 0; i < maxNumConcurrantCommands; i++ {
 		go commandQueueWorker(commandQueue, commandsDone)
 	}
 	go commandQueueCollector()
-
-	// start regular node-cleanup
-	go cleanupNodes()
 
 	// serve static files
 	fs := http.FileServer(http.Dir(serveFilesPath))
