@@ -116,18 +116,14 @@ func (server *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		server.closingClients <- messageChan
 	}()
 
-	// Listen to connection close and un-register messageChan
-	notifyClose := rw.(http.CloseNotifier).CloseNotify()
-
 	// block waiting for messages broadcast on this connection's messageChan
 	for {
 		select {
 		case msg := <-messageChan:
 			rw.Write(msg)
 			flusher.Flush()
-		case <-notifyClose:
+		case <-req.Context().Done():
 			return
 		}
-
 	}
 }
